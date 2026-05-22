@@ -1,0 +1,23 @@
+[package]
+name = "aura-fits"
+version = "1.0.5"
+description = "Aura Fits Management Console"
+authors = ["Aura Fits"]
+edition = "2021"
+rust-version = "1.77"
+
+[lib]
+name = "aura_fits_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+tauri-plugin-fs = "2"
+tauri-plugin-opener = "2"
+thiserror = "2"
