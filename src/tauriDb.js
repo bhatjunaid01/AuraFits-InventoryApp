@@ -56,7 +56,16 @@ export const db = {
   updateExpense: (expense) => call("update_expense", { expense }),
   deleteExpense: (id) => call("delete_expense", { id }),
 
-  recordSale: (data) => call("record_sale", data),
+  recordSale: (data) => call("record_sale", {
+    cart: data.cart,
+    total: data.total,
+    discount: data.discount,
+    payment: data.payment,
+    customerName: data.customerName,
+    customerPhone: data.customerPhone || "",
+    amountPaid: data.amountPaid || 0,
+    balance: data.balance || 0,
+  }),
   getTodaySales: () => call("get_today_sales"),
   getSalesStats: () => call("get_sales_stats"),
   getStatement: (fromDate, toDate) => call("get_statement", { fromDate, toDate }),

@@ -60,6 +60,9 @@ fn init_db(conn: &Connection) -> rusqlite::Result<()> {
           discount REAL DEFAULT 0,
           payment TEXT,
           customer_name TEXT,
+          customer_phone TEXT,
+          amount_paid REAL DEFAULT 0,
+          balance REAL DEFAULT 0,
           created_at TEXT DEFAULT (datetime('now','localtime'))
         );
 
@@ -94,6 +97,9 @@ fn init_db(conn: &Connection) -> rusqlite::Result<()> {
         "ALTER TABLE sale_items ADD COLUMN size TEXT",
         "ALTER TABLE sale_items ADD COLUMN color TEXT",
         "ALTER TABLE sale_items ADD COLUMN cost REAL DEFAULT 0",
+        "ALTER TABLE sales ADD COLUMN customer_phone TEXT",
+        "ALTER TABLE sales ADD COLUMN amount_paid REAL DEFAULT 0",
+        "ALTER TABLE sales ADD COLUMN balance REAL DEFAULT 0",
     ] {
         let _ = conn.execute(migration, []);
     }
@@ -264,6 +270,7 @@ pub struct StatementRow {
     sale_id: i64,
     created_at: String,
     customer_name: String,
+    customer_phone: String,
     payment: String,
     product_name: String,
     category: String,
@@ -276,6 +283,8 @@ pub struct StatementRow {
     profit: f64,
     sale_total: f64,
     discount: f64,
+    amount_paid: f64,
+    balance: f64,
 }
 
 #[tauri::command]
@@ -598,12 +607,24 @@ pub fn record_sale(
     discount: f64,
     payment: String,
     customer_name: String,
+    customer_phone: Option<String>,
+    amount_paid: Option<f64>,
+    balance: Option<f64>,
 ) -> Result<SaleResponse, String> {
     let mut conn = lock_conn(&state)?;
     let tx = conn.transaction().map_err(|e| e.to_string())?;
     tx.execute(
-        "INSERT INTO sales (total, discount, payment, customer_name) VALUES (?1, ?2, ?3, ?4)",
-        params![total, discount, payment, customer_name],
+        "INSERT INTO sales (total, discount, payment, customer_name, customer_phone, amount_paid, balance)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![
+            total,
+            discount,
+            payment,
+            customer_name,
+            customer_phone.unwrap_or_default(),
+            amount_paid.unwrap_or(0.0),
+            balance.unwrap_or(0.0)
+        ],
     )
     .map_err(|e| e.to_string())?;
     let sale_id = tx.last_insert_rowid();
@@ -743,6 +764,7 @@ pub fn get_statement(
             SELECT s.id,
                    COALESCE(s.created_at, ''),
                    COALESCE(s.customer_name, ''),
+                   COALESCE(s.customer_phone, ''),
                    COALESCE(s.payment, ''),
                    COALESCE(si.product_name, ''),
                    COALESCE(si.category, p.category, ''),
@@ -754,7 +776,9 @@ pub fn get_statement(
                    COALESCE(si.qty, 0) * COALESCE(si.price, 0) as line_total,
                    (COALESCE(si.price, 0) - COALESCE(NULLIF(si.cost, 0), p.cost, 0)) * COALESCE(si.qty, 0) as profit,
                    COALESCE(s.total, 0),
-                   COALESCE(s.discount, 0)
+                   COALESCE(s.discount, 0),
+                   COALESCE(s.amount_paid, 0),
+                   COALESCE(s.balance, 0)
             FROM sales s
             LEFT JOIN sale_items si ON s.id = si.sale_id
             LEFT JOIN products p ON p.id = si.product_id
@@ -771,18 +795,21 @@ pub fn get_statement(
                 sale_id: row.get(0)?,
                 created_at: row.get(1)?,
                 customer_name: row.get(2)?,
-                payment: row.get(3)?,
-                product_name: row.get(4)?,
-                category: row.get(5)?,
-                size: row.get(6)?,
-                color: row.get(7)?,
-                qty: row.get(8)?,
-                cost: row.get(9)?,
-                price: row.get(10)?,
-                line_total: row.get(11)?,
-                profit: row.get(12)?,
-                sale_total: row.get(13)?,
-                discount: row.get(14)?,
+                customer_phone: row.get(3)?,
+                payment: row.get(4)?,
+                product_name: row.get(5)?,
+                category: row.get(6)?,
+                size: row.get(7)?,
+                color: row.get(8)?,
+                qty: row.get(9)?,
+                cost: row.get(10)?,
+                price: row.get(11)?,
+                line_total: row.get(12)?,
+                profit: row.get(13)?,
+                sale_total: row.get(14)?,
+                discount: row.get(15)?,
+                amount_paid: row.get(16)?,
+                balance: row.get(17)?,
             })
         })
         .map_err(|e| e.to_string())?;

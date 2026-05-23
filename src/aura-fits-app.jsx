@@ -12,12 +12,13 @@ const rupees = (value) => `₹${(Number(value) || 0).toLocaleString("en-IN")}`;
 const escapeHtml = (value) => String(value ?? "").replace(/[&<>"']/g, ch => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch]));
 
 function buildExcelHtml(title, rows, totals = {}) {
-  const headers = ["S.No.", "Date/Time", "Customer", "Product", "Category", "Size", "Color", "Qty", "Cost Price", "Sell Price", "Profit", "Product Total", "Bill Total"];
+  const headers = ["S.No.", "Date/Time", "Customer", "Phone", "Product", "Category", "Size", "Color", "Qty", "Cost Price", "Sell Price", "Total Price", "Profit", "Product Total", "Bill Total", "Balance"];
   const bodyRows = rows.map(r => `
     <tr>
       <td>${escapeHtml(r.serial_no)}</td>
       <td>${escapeHtml(r.created_at)}</td>
       <td>${escapeHtml(r.customer_name)}</td>
+      <td>${escapeHtml(r.customer_phone || "")}</td>
       <td>${escapeHtml(r.product_name)}</td>
       <td>${escapeHtml(r.category)}</td>
       <td>${escapeHtml(r.size)}</td>
@@ -25,9 +26,11 @@ function buildExcelHtml(title, rows, totals = {}) {
       <td>${escapeHtml(r.qty)}</td>
       <td>${Number(r.cost || 0).toFixed(2)}</td>
       <td>${Number(r.price || 0).toFixed(2)}</td>
+      <td>${Number(r.line_total || 0).toFixed(2)}</td>
       <td>${Number(r.profit || 0).toFixed(2)}</td>
       <td>${Number(r.line_total || 0).toFixed(2)}</td>
       <td>${Number(r.sale_total || 0).toFixed(2)}</td>
+      <td>${Number(r.balance || 0).toFixed(2)}</td>
     </tr>`).join("");
   const profit = rows.reduce((sum, r) => sum + (Number(r.profit) || 0), 0);
   const html = `
@@ -47,16 +50,18 @@ function buildExcelHtml(title, rows, totals = {}) {
   return html;
 }
 
-function buildReceiptHtml(receipt, includeButton = true) {
+function buildReceiptHtml(receipt) {
   const receiptText = [
     "Aura Fits Receipt",
     `Receipt #${receipt.saleId}`,
     `Customer: ${receipt.customerName || "Walk-in Customer"}`,
+    receipt.customerPhone ? `Phone: ${receipt.customerPhone}` : "",
     `Date: ${receipt.date}`,
     `Payment: ${receipt.payment}`,
     ...receipt.items.map(item => `${item.name} x${item.qty} - ${rupees(item.lineTotal)}`),
     `Total: ${rupees(receipt.total)}`,
-  ].join("\n");
+    receipt.balance > 0 ? `Balance Due: ${rupees(receipt.balance)}` : "",
+  ].filter(Boolean).join("\n");
   const shareText = encodeURIComponent(receiptText);
   const mailSubject = encodeURIComponent(`Aura Fits Receipt #${receipt.saleId}`);
   const itemRows = receipt.items.map(item => `
@@ -66,6 +71,9 @@ function buildReceiptHtml(receipt, includeButton = true) {
       <td style="text-align:right">${rupees(item.unitPrice)}</td>
       <td style="text-align:right">${rupees(item.lineTotal)}</td>
     </tr>`).join("");
+  const balanceRow = receipt.balance > 0
+    ? `<div class="line" style="color:#c05f5f;font-weight:600"><span>Balance Due</span><span>${rupees(receipt.balance)}</span></div>`
+    : "";
   return `
     <html>
       <head>
@@ -80,14 +88,13 @@ function buildReceiptHtml(receipt, includeButton = true) {
           .line { display: flex; justify-content: space-between; margin-top: 8px; font-size: 13px; }
           .total { font-size: 18px; font-weight: 700; border-top: 1px solid #111; padding-top: 10px; }
           .share { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; margin-top: 16px; }
-          .share a, button { border: 1px solid #111; border-radius: 6px; color: #111; display: block; font-size: 12px; padding: 9px; text-align: center; text-decoration: none; }
-          @media print { button, .share { display: none; } body { padding: 0; } }
+          .share a { border: 1px solid #111; border-radius: 6px; color: #111; display: block; font-size: 12px; padding: 9px; text-align: center; text-decoration: none; }
         </style>
       </head>
       <body>
         <h1>AURA FITS</h1>
         <p class="muted" style="text-align:center">Receipt #${escapeHtml(receipt.saleId)} · ${escapeHtml(receipt.date)}</p>
-        <p class="muted">Customer: ${escapeHtml(receipt.customerName || "Walk-in Customer")}</p>
+        <p class="muted">Customer: ${escapeHtml(receipt.customerName || "Walk-in Customer")}${receipt.customerPhone ? ` · 📞 ${escapeHtml(receipt.customerPhone)}` : ""}</p>
         <p class="muted">Payment: ${escapeHtml(receipt.payment)}</p>
         <table>
           <thead><tr><th>Product</th><th>Qty</th><th style="text-align:right">Rate</th><th style="text-align:right">Subtotal</th></tr></thead>
@@ -96,25 +103,18 @@ function buildReceiptHtml(receipt, includeButton = true) {
         <div class="line"><span>Subtotal</span><span>${rupees(receipt.subtotal)}</span></div>
         <div class="line"><span>Discount (${receipt.discount}%)</span><span>-${rupees(receipt.discountAmt)}</span></div>
         <div class="line total"><span>Total</span><span>${rupees(receipt.total)}</span></div>
+        ${balanceRow}
         <p class="muted" style="text-align:center;margin-top:24px">Thank you for shopping with us.</p>
         <div class="share">
           <a href="https://wa.me/?text=${shareText}" target="_blank">WhatsApp</a>
           <a href="mailto:?subject=${mailSubject}&body=${shareText}">Email</a>
           <a href="sms:?body=${shareText}">SMS</a>
         </div>
-        ${includeButton ? '<button onclick="window.print()" style="width:100%;padding:10px;margin-top:16px">Print Receipt</button>' : ''}
       </body>
     </html>
   `;
 }
 
-function printReceipt(receipt) {
-  const printWindow = window.open("", "_blank", "width=420,height=650");
-  if (!printWindow) return;
-  printWindow.document.write(buildReceiptHtml(receipt));
-  printWindow.document.close();
-  printWindow.focus();
-}
 
 const globalStyles = `
   @import url('https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@300;400;600&family=DM+Sans:wght@300;400;500;600&display=swap');
@@ -626,6 +626,8 @@ function POSPage({ addToast }) {
   const [search, setSearch] = useState("");
   const [catFilter, setCatFilter] = useState("All");
   const [customerName, setCustomerName] = useState("");
+  const [customerPhone, setCustomerPhone] = useState("");
+  const [amountPaid, setAmountPaid] = useState("");
   const [cart, setCart] = useState([]);
   const [discount, setDiscount] = useState(0);
   const [payment, setPayment] = useState("Cash");
@@ -668,12 +670,15 @@ function POSPage({ addToast }) {
     if (cart.some(i => !Number(i.sellPrice))) { addToast("Enter sale price for every product", "error"); return; }
     const cartToSave = cart.map(i => ({ ...i, price: Number(i.sellPrice) || 0 }));
     const receiptCustomer = customerName.trim() || "Walk-in Customer";
-    const result = await window.db.recordSale({ cart: cartToSave, total, discount, payment, customerName: receiptCustomer });
+    const paid = Number(amountPaid) || 0;
+    const balance = paid > 0 ? Math.max(0, total - paid) : 0;
+    const result = await window.db.recordSale({ cart: cartToSave, total, discount, payment, customerName: receiptCustomer, customerPhone: customerPhone.trim(), amountPaid: paid, balance });
     if (result.ok) {
       setLastReceipt({
         saleId: result.saleId,
         date: new Date().toLocaleString("en-IN"),
         customerName: receiptCustomer,
+        customerPhone: customerPhone.trim(),
         payment,
         items: cart.map(i => {
           const unitPrice = Number(i.sellPrice) || 0;
@@ -683,9 +688,11 @@ function POSPage({ addToast }) {
         discount,
         discountAmt,
         total,
+        amountPaid: paid,
+        balance,
       });
       addToast(`Sale of ₹${total.toLocaleString()} recorded via ${payment}`, "success");
-      setCart([]); setDiscount(0); setCustomerName("");
+      setCart([]); setDiscount(0); setCustomerName(""); setCustomerPhone(""); setAmountPaid("");
       // Refresh products to show updated stock
       window.db.getProducts().then(setProducts);
     } else {
@@ -734,6 +741,7 @@ function POSPage({ addToast }) {
           <p style={{ fontFamily: "'Cormorant Garamond', serif", fontSize: 18, color: GOLD }}>Current Sale</p>
           <p style={{ fontSize: 11, color: "#555", marginTop: 2 }}>{cart.length} item{cart.length !== 1 ? "s" : ""}</p>
           <input value={customerName} onChange={e => setCustomerName(e.target.value)} placeholder="Customer name" style={{ marginTop: 12, height: 40 }} />
+          <input value={customerPhone} onChange={e => setCustomerPhone(e.target.value)} placeholder="Customer phone (optional)" style={{ marginTop: 8, height: 40 }} type="tel" />
         </div>
         <div style={{ flex: 1, overflowY: "auto", padding: "12px 16px" }}>
           {cart.length === 0
@@ -774,6 +782,22 @@ function POSPage({ addToast }) {
             <span style={{ fontSize: 15, color: "#E8E4D9", fontWeight: 500 }}>Total</span>
             <span style={{ fontSize: 20, color: GOLD, fontWeight: 700, fontFamily: "'Cormorant Garamond', serif" }}>₹{total.toLocaleString()}</span>
           </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+            <span style={{ fontSize: 12, color: "#666", flex: 1 }}>Amount Paid ₹</span>
+            <input type="number" value={amountPaid} onChange={e => setAmountPaid(e.target.value)} style={{ width: 110, padding: "6px 10px", textAlign: "right" }} min={0} placeholder="Full amount" />
+          </div>
+          {amountPaid !== "" && Number(amountPaid) < total && (
+            <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8, background: "#2d1a1a", borderRadius: 8, padding: "8px 12px", border: "1px solid #5c2d2d" }}>
+              <span style={{ fontSize: 13, color: "#c05f5f", fontWeight: 600 }}>Balance Due</span>
+              <span style={{ fontSize: 14, color: "#c05f5f", fontWeight: 700 }}>₹{Math.max(0, total - Number(amountPaid)).toLocaleString()}</span>
+            </div>
+          )}
+          {amountPaid !== "" && Number(amountPaid) >= total && (
+            <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8, background: "#1a2d1a", borderRadius: 8, padding: "8px 12px", border: "1px solid #2d5c2d" }}>
+              <span style={{ fontSize: 13, color: "#5fa05f", fontWeight: 600 }}>Change</span>
+              <span style={{ fontSize: 14, color: "#5fa05f", fontWeight: 700 }}>₹{Math.max(0, Number(amountPaid) - total).toLocaleString()}</span>
+            </div>
+          )}
           <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
             {["Cash", "UPI", "Card"].map(m => (
               <button key={m} onClick={() => setPayment(m)} style={{
@@ -792,7 +816,8 @@ function POSPage({ addToast }) {
       {lastReceipt && (
         <Modal title={`Receipt #${lastReceipt.saleId}`} onClose={() => setLastReceipt(null)} width={460}>
           <div style={{ background: "#0d0d0d", border: "1px solid #1e1e1e", borderRadius: 10, padding: 14, marginBottom: 16 }}>
-            <p style={{ fontSize: 12, color: "#666", marginBottom: 4 }}>{lastReceipt.date} · {lastReceipt.payment}</p>
+            <p style={{ fontSize: 12, color: "#666", marginBottom: 2 }}>{lastReceipt.date} · {lastReceipt.payment}</p>
+            {lastReceipt.customerPhone && <p style={{ fontSize: 12, color: "#555", marginBottom: 4 }}>📞 {lastReceipt.customerPhone}</p>}
             {lastReceipt.items.map((item, i) => (
               <div key={i} style={{ display: "grid", gridTemplateColumns: "1fr 48px 90px", gap: 10, padding: "8px 0", borderBottom: i === lastReceipt.items.length - 1 ? "none" : "1px solid #1a1a1a" }}>
                 <span style={{ color: "#C8C4B8", fontSize: 13 }}>{item.name}</span>
@@ -803,7 +828,16 @@ function POSPage({ addToast }) {
           </div>
           <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, color: "#888", marginBottom: 8 }}><span>Subtotal</span><span>{rupees(lastReceipt.subtotal)}</span></div>
           <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, color: "#c05f5f", marginBottom: 8 }}><span>Discount</span><span>-{rupees(lastReceipt.discountAmt)}</span></div>
-          <div style={{ display: "flex", justifyContent: "space-between", fontSize: 18, color: GOLD, marginBottom: 18, borderTop: "1px solid #222", paddingTop: 12 }}><span>Total</span><span>{rupees(lastReceipt.total)}</span></div>
+          <div style={{ display: "flex", justifyContent: "space-between", fontSize: 18, color: GOLD, marginBottom: 8, borderTop: "1px solid #222", paddingTop: 12 }}><span>Total</span><span>{rupees(lastReceipt.total)}</span></div>
+          {lastReceipt.amountPaid > 0 && (
+            <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, color: "#888", marginBottom: 4 }}><span>Amount Paid</span><span>{rupees(lastReceipt.amountPaid)}</span></div>
+          )}
+          {lastReceipt.balance > 0 && (
+            <div style={{ display: "flex", justifyContent: "space-between", fontSize: 14, color: "#c05f5f", fontWeight: 700, background: "#2d1a1a", borderRadius: 8, padding: "8px 12px", marginBottom: 8, border: "1px solid #5c2d2d" }}>
+              <span>Balance Due</span><span>{rupees(lastReceipt.balance)}</span>
+            </div>
+          )}
+          <div style={{ marginBottom: 18 }} />
           <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
             <GoldButton variant="outline" onClick={() => setLastReceipt(null)}>Close</GoldButton>
             <GoldButton variant="outline" onClick={async () => {
@@ -812,10 +846,24 @@ function POSPage({ addToast }) {
                 filters: [{ name: "Receipt", extensions: ["html"] }],
               });
               if (!filePath) return;
-              await writeTextFile(filePath, buildReceiptHtml(lastReceipt, false));
+              await writeTextFile(filePath, buildReceiptHtml(lastReceipt));
               addToast("Receipt saved", "success");
             }}>Save Receipt</GoldButton>
-            <GoldButton onClick={() => printReceipt(lastReceipt)}>Print Receipt</GoldButton>
+            <GoldButton onClick={() => {
+              const receiptText = [
+                "Aura Fits Receipt",
+                `Receipt #${lastReceipt.saleId}`,
+                `Customer: ${lastReceipt.customerName}`,
+                lastReceipt.customerPhone ? `Phone: ${lastReceipt.customerPhone}` : "",
+                `Date: ${lastReceipt.date}`,
+                `Payment: ${lastReceipt.payment}`,
+                ...lastReceipt.items.map(item => `${item.name} x${item.qty} - ${rupees(item.lineTotal)}`),
+                `Total: ${rupees(lastReceipt.total)}`,
+                lastReceipt.balance > 0 ? `Balance Due: ${rupees(lastReceipt.balance)}` : "",
+              ].filter(Boolean).join("\n");
+              const shareUrl = `https://wa.me/?text=${encodeURIComponent(receiptText)}`;
+              window.open(shareUrl, "_blank");
+            }}>Share Receipt</GoldButton>
           </div>
         </Modal>
       )}
