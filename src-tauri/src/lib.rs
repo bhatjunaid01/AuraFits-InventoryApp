@@ -2,6 +2,7 @@ mod db;
 
 use tauri::Manager;
 use tauri_plugin_updater::UpdaterExt;
+use tauri::Manager as _;
 
 use db::{
     add_category, add_expense, add_product, delete_category, delete_expense, delete_product,
@@ -17,7 +18,6 @@ pub fn run() {
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
-        .plugin(tauri_plugin_process::init())
         .setup(|app| {
             let state = AppState::new(app.handle())?;
             app.manage(state);
@@ -28,17 +28,17 @@ pub fn run() {
                 if let Ok(updater) = handle.updater() {
                     if let Ok(Some(update)) = updater.check().await {
                         let version = update.version.clone();
-                        let dialog = tauri_plugin_dialog::DialogExt::dialog(&handle)
+                        let (tx, rx) = std::sync::mpsc::channel();
+                        tauri_plugin_dialog::DialogExt::dialog(&handle)
                             .message(format!(
                                 "Aura Fits {} is available. Install now?\nThe app will restart after updating.",
                                 version
                             ))
                             .title("Update Available")
-                            .ok_button_label("Install")
-                            .cancel_button_label("Later");
-                        if dialog.blocking_show() {
+                            .show(move |confirmed| { let _ = tx.send(confirmed); });
+                        if let Ok(true) = rx.recv() {
                             let _ = update.download_and_install(|_, _| {}, || {}).await;
-                            tauri_plugin_process::restart(&handle.env());
+                            handle.restart();
                         }
                     }
                 }
