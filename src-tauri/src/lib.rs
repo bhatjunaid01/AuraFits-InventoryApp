@@ -6,7 +6,8 @@ use db::{
     add_category, add_expense, add_product, delete_category, delete_expense, delete_product,
     find_user, get_categories, get_expenses, get_products, get_sales_stats, get_today_sales,
     get_statement, login, record_sale, reset_password, signup, update_category, update_expense,
-    update_product, AppState,
+    update_product, delete_sale, update_sale, get_pending_balances, update_balance,
+    verify_security_answer, AppState,
 };
 
 pub fn run() {
@@ -23,6 +24,7 @@ pub fn run() {
             login,
             signup,
             find_user,
+            verify_security_answer,
             reset_password,
             get_products,
             add_product,
@@ -39,7 +41,11 @@ pub fn run() {
             record_sale,
             get_today_sales,
             get_sales_stats,
-            get_statement
+            get_statement,
+            delete_sale,
+            update_sale,
+            get_pending_balances,
+            update_balance
         ])
         .run(tauri::generate_context!())
         .expect("error while running Aura Fits");

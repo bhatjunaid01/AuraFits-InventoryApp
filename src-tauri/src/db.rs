@@ -14,6 +14,7 @@ impl AppState {
         fs::create_dir_all(&app_data_dir)?;
         let db_path = app_data_dir.join("aurafits.db");
         let conn = Connection::open(db_path)?;
+        conn.execute_batch("PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;")?;
         init_db(&conn)?;
         Ok(Self {
             conn: Mutex::new(conn),
@@ -24,8 +25,6 @@ impl AppState {
 fn init_db(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch(
         "
-        PRAGMA foreign_keys = ON;
-
         CREATE TABLE IF NOT EXISTS products (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           name TEXT NOT NULL,
@@ -177,6 +176,7 @@ pub struct SignupInput {
 pub struct ResetPasswordInput {
     email: String,
     new_password: String,
+    security_answer: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -262,12 +262,14 @@ pub struct SalesStats {
     today: SalesTotal,
     month: SalesTotal,
     weekly: Vec<WeeklySale>,
+    real_profit: f64,
 }
 
 #[derive(Debug, Serialize)]
 pub struct StatementRow {
     serial_no: i64,
     sale_id: i64,
+    product_id: i64,
     created_at: String,
     customer_name: String,
     customer_phone: String,
@@ -354,20 +356,33 @@ pub fn signup(state: State<AppState>, input: SignupInput) -> Result<SignupRespon
 }
 
 #[tauri::command]
-pub fn find_user(state: State<AppState>, email: String) -> Result<Option<SecurityUser>, String> {
+pub fn find_user(state: State<AppState>, email: String) -> Result<Option<String>, String> {
     let conn = lock_conn(&state)?;
     conn.query_row(
-        "SELECT security_question, security_answer FROM users WHERE email = ?1",
+        "SELECT security_question FROM users WHERE email = ?1",
         [email],
-        |row| {
-            Ok(SecurityUser {
-                security_question: row.get(0)?,
-                security_answer: row.get(1)?,
-            })
-        },
+        |row| row.get(0),
     )
     .optional()
     .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn verify_security_answer(
+    state: State<AppState>,
+    email: String,
+    answer: String,
+) -> Result<bool, String> {
+    let conn = lock_conn(&state)?;
+    let stored: Option<String> = conn
+        .query_row(
+            "SELECT security_answer FROM users WHERE email = ?1",
+            [&email],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
+    Ok(stored.map(|s| s.to_lowercase().trim().to_string()) == Some(answer.to_lowercase().trim().to_string()))
 }
 
 #[tauri::command]
@@ -376,6 +391,21 @@ pub fn reset_password(
     input: ResetPasswordInput,
 ) -> Result<OkResponse, String> {
     let conn = lock_conn(&state)?;
+    // Verify security answer before allowing password reset
+    let stored_answer: Option<String> = conn
+        .query_row(
+            "SELECT security_answer FROM users WHERE email = ?1",
+            [&input.email],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
+    let answer_ok = stored_answer
+        .map(|s| s.to_lowercase().trim().to_string())
+        == Some(input.security_answer.to_lowercase().trim().to_string());
+    if !answer_ok {
+        return Ok(OkResponse { ok: false });
+    }
     conn.execute(
         "UPDATE users SET password = ?1 WHERE email = ?2",
         params![input.new_password, input.email],
@@ -646,11 +676,14 @@ pub fn record_sale(
             ],
         )
         .map_err(|e| e.to_string())?;
-        tx.execute(
-            "UPDATE products SET stock = stock - ?1 WHERE id = ?2",
+        let rows_affected = tx.execute(
+            "UPDATE products SET stock = stock - ?1 WHERE id = ?2 AND stock >= ?1",
             params![item.qty, item.id],
         )
         .map_err(|e| e.to_string())?;
+        if rows_affected == 0 {
+            return Err(format!("Insufficient stock for product id {}", item.id));
+        }
     }
 
     tx.commit().map_err(|e| e.to_string())?;
@@ -744,10 +777,26 @@ pub fn get_sales_stats(state: State<AppState>) -> Result<SalesStats, String> {
         .collect::<rusqlite::Result<Vec<_>>>()
         .map_err(|e| e.to_string())?;
 
+    let real_profit: f64 = conn
+        .query_row(
+            "SELECT COALESCE(SUM(
+                (si.price - COALESCE(NULLIF(si.cost,0), p.cost, 0)) * si.qty
+                * (CASE WHEN s.total > 0 THEN (s.total - COALESCE(s.balance,0)) / s.total ELSE 1 END)
+             ), 0)
+             FROM sale_items si
+             JOIN sales s ON s.id = si.sale_id
+             LEFT JOIN products p ON p.id = si.product_id
+             WHERE strftime('%Y-%m', s.created_at) = strftime('%Y-%m','now','localtime')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+
     Ok(SalesStats {
         today,
         month,
         weekly,
+        real_profit,
     })
 }
 
@@ -762,6 +811,7 @@ pub fn get_statement(
         .prepare(
             "
             SELECT s.id,
+                   COALESCE(si.product_id, 0),
                    COALESCE(s.created_at, ''),
                    COALESCE(s.customer_name, ''),
                    COALESCE(s.customer_phone, ''),
@@ -793,23 +843,24 @@ pub fn get_statement(
             Ok(StatementRow {
                 serial_no: 0,
                 sale_id: row.get(0)?,
-                created_at: row.get(1)?,
-                customer_name: row.get(2)?,
-                customer_phone: row.get(3)?,
-                payment: row.get(4)?,
-                product_name: row.get(5)?,
-                category: row.get(6)?,
-                size: row.get(7)?,
-                color: row.get(8)?,
-                qty: row.get(9)?,
-                cost: row.get(10)?,
-                price: row.get(11)?,
-                line_total: row.get(12)?,
-                profit: row.get(13)?,
-                sale_total: row.get(14)?,
-                discount: row.get(15)?,
-                amount_paid: row.get(16)?,
-                balance: row.get(17)?,
+                product_id: row.get(1)?,
+                created_at: row.get(2)?,
+                customer_name: row.get(3)?,
+                customer_phone: row.get(4)?,
+                payment: row.get(5)?,
+                product_name: row.get(6)?,
+                category: row.get(7)?,
+                size: row.get(8)?,
+                color: row.get(9)?,
+                qty: row.get(10)?,
+                cost: row.get(11)?,
+                price: row.get(12)?,
+                line_total: row.get(13)?,
+                profit: row.get(14)?,
+                sale_total: row.get(15)?,
+                discount: row.get(16)?,
+                amount_paid: row.get(17)?,
+                balance: row.get(18)?,
             })
         })
         .map_err(|e| e.to_string())?;
@@ -821,4 +872,152 @@ pub fn get_statement(
         row.serial_no = (index + 1) as i64;
     }
     Ok(rows)
+}
+
+#[tauri::command]
+pub fn delete_sale(state: State<AppState>, id: i64) -> Result<OkResponse, String> {
+    let mut conn = lock_conn(&state)?;
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    // Return stock for all items in this sale
+    {
+        let mut stmt = tx.prepare(
+            "SELECT product_id, qty FROM sale_items WHERE sale_id = ?1"
+        ).map_err(|e| e.to_string())?;
+        let items: Vec<(i64, i64)> = stmt.query_map([id], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        }).map_err(|e| e.to_string())?
+        .filter_map(|r| r.ok())
+        .collect();
+        for (product_id, qty) in items {
+            tx.execute(
+                "UPDATE products SET stock = stock + ?1 WHERE id = ?2",
+                params![qty, product_id],
+            ).map_err(|e| e.to_string())?;
+        }
+    }
+    tx.execute("DELETE FROM sale_items WHERE sale_id = ?1", [id])
+        .map_err(|e| e.to_string())?;
+    tx.execute("DELETE FROM sales WHERE id = ?1", [id])
+        .map_err(|e| e.to_string())?;
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(OkResponse { ok: true })
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateSaleInput {
+    pub id: i64,
+    pub customer_name: String,
+    pub customer_phone: String,
+    pub payment: String,
+    pub discount: f64,
+    pub amount_paid: f64,
+    pub balance: f64,
+    pub total: f64,
+    pub cart: Vec<CartItem>,
+}
+
+#[tauri::command]
+pub fn update_sale(state: State<AppState>, input: UpdateSaleInput) -> Result<OkResponse, String> {
+    let mut conn = lock_conn(&state)?;
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    // Restore stock for old items
+    {
+        let mut stmt = tx.prepare(
+            "SELECT product_id, qty FROM sale_items WHERE sale_id = ?1"
+        ).map_err(|e| e.to_string())?;
+        let old_items: Vec<(i64, i64)> = stmt.query_map([input.id], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        }).map_err(|e| e.to_string())?
+        .filter_map(|r| r.ok())
+        .collect();
+        for (product_id, qty) in old_items {
+            tx.execute(
+                "UPDATE products SET stock = stock + ?1 WHERE id = ?2",
+                params![qty, product_id],
+            ).map_err(|e| e.to_string())?;
+        }
+    }
+    // Delete old items
+    tx.execute("DELETE FROM sale_items WHERE sale_id = ?1", [input.id])
+        .map_err(|e| e.to_string())?;
+    // Update sale header
+    tx.execute(
+        "UPDATE sales SET customer_name=?1, customer_phone=?2, payment=?3, discount=?4, amount_paid=?5, balance=?6, total=?7 WHERE id=?8",
+        params![input.customer_name, input.customer_phone, input.payment, input.discount, input.amount_paid, input.balance, input.total, input.id],
+    ).map_err(|e| e.to_string())?;
+    // Insert new items and deduct stock
+    for item in &input.cart {
+        tx.execute(
+            "INSERT INTO sale_items (sale_id, product_id, product_name, category, size, color, cost, qty, price)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![input.id, item.id, item.name, item.category, item.size, item.color, item.cost, item.qty, item.price],
+        ).map_err(|e| e.to_string())?;
+        let rows_affected = tx.execute(
+            "UPDATE products SET stock = stock - ?1 WHERE id = ?2 AND stock >= ?1",
+            params![item.qty, item.id],
+        ).map_err(|e| e.to_string())?;
+        if rows_affected == 0 {
+            return Err(format!("Insufficient stock for product id {}", item.id));
+        }
+    }
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(OkResponse { ok: true })
+}
+#[derive(Debug, Serialize)]
+pub struct PendingBalance {
+    sale_id: i64,
+    customer_name: String,
+    customer_phone: String,
+    sale_total: f64,
+    amount_paid: f64,
+    balance: f64,
+    payment: String,
+    created_at: String,
+    items_summary: String,
+}
+
+#[tauri::command]
+pub fn get_pending_balances(state: State<AppState>) -> Result<Vec<PendingBalance>, String> {
+    let conn = lock_conn(&state)?;
+    let mut stmt = conn.prepare(
+        "SELECT s.id,
+                COALESCE(s.customer_name, 'Walk-in Customer'),
+                COALESCE(s.customer_phone, ''),
+                COALESCE(s.total, 0),
+                COALESCE(s.amount_paid, 0),
+                COALESCE(s.balance, 0),
+                COALESCE(s.payment, ''),
+                COALESCE(s.created_at, ''),
+                COALESCE(GROUP_CONCAT(si.product_name || ' x' || si.qty), '') as items_summary
+         FROM sales s
+         LEFT JOIN sale_items si ON s.id = si.sale_id
+         WHERE s.balance > 0
+         GROUP BY s.id
+         ORDER BY s.created_at DESC"
+    ).map_err(|e| e.to_string())?;
+    let rows = stmt.query_map([], |row| {
+        Ok(PendingBalance {
+            sale_id: row.get(0)?,
+            customer_name: row.get(1)?,
+            customer_phone: row.get(2)?,
+            sale_total: row.get(3)?,
+            amount_paid: row.get(4)?,
+            balance: row.get(5)?,
+            payment: row.get(6)?,
+            created_at: row.get(7)?,
+            items_summary: row.get(8)?,
+        })
+    }).map_err(|e| e.to_string())?;
+    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn update_balance(state: State<AppState>, sale_id: i64, amount_paid: f64, balance: f64) -> Result<OkResponse, String> {
+    let conn = lock_conn(&state)?;
+    conn.execute(
+        "UPDATE sales SET amount_paid = ?1, balance = ?2 WHERE id = ?3",
+        params![amount_paid, balance, sale_id],
+    ).map_err(|e| e.to_string())?;
+    Ok(OkResponse { ok: true })
 }

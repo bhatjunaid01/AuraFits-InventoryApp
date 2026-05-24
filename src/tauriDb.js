@@ -69,6 +69,31 @@ export const db = {
   getTodaySales: () => call("get_today_sales"),
   getSalesStats: () => call("get_sales_stats"),
   getStatement: (fromDate, toDate) => call("get_statement", { fromDate, toDate }),
+  deleteSale: (id) => call("delete_sale", { id }),
+  updateSale: (input) => call("update_sale", {
+    input: {
+      id: input.id,
+      customerName: input.customerName,
+      customerPhone: input.customerPhone || "",
+      payment: input.payment,
+      discount: Number(input.discount) || 0,
+      amountPaid: Number(input.amountPaid) || 0,
+      balance: Number(input.balance) || 0,
+      total: Number(input.total) || 0,
+      cart: input.cart.map(i => ({
+        id: Number(i.id),
+        name: String(i.name),
+        category: i.category || null,
+        size: i.size || null,
+        color: i.color || null,
+        cost: Number(i.cost) || 0,
+        qty: Number(i.qty) || 1,
+        price: Number(i.sellPrice) || Number(i.price) || 0,
+      })),
+    }
+  }),
+  getPendingBalances: () => call("get_pending_balances"),
+  updateBalance: (saleId, amountPaid, balance) => call("update_balance", { sale_id: saleId, amount_paid: amountPaid, balance }),
 };
 
 export function installDbBridge() {

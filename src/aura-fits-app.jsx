@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, PieChart, Pie, Cell, AreaChart, Area } from "recharts";
 import { save } from "@tauri-apps/plugin-dialog";
 import { writeTextFile } from "@tauri-apps/plugin-fs";
@@ -28,91 +28,134 @@ function buildExcelHtml(title, rows, totals = {}) {
       <td>${Number(r.price || 0).toFixed(2)}</td>
       <td>${Number(r.line_total || 0).toFixed(2)}</td>
       <td>${Number(r.profit || 0).toFixed(2)}</td>
-      <td>${Number(r.line_total || 0).toFixed(2)}</td>
+      <td>${Number(r.sale_total || 0).toFixed(2)}</td>
       <td>${Number(r.sale_total || 0).toFixed(2)}</td>
       <td>${Number(r.balance || 0).toFixed(2)}</td>
     </tr>`).join("");
-  const profit = rows.reduce((sum, r) => sum + (Number(r.profit) || 0), 0);
-  const html = `
-    <html>
-      <head><meta charset="utf-8" /></head>
-      <body>
-        <h2>${escapeHtml(title)}</h2>
-        <p>Total sales: ${Number(totals.sales || 0).toFixed(2)}</p>
-        <p>Total product subtotals: ${Number(totals.subtotal || 0).toFixed(2)}</p>
-        <p>Total profit: ${profit.toFixed(2)}</p>
-        <table border="1">
-          <thead><tr>${headers.map(h => `<th>${escapeHtml(h)}</th>`).join("")}</tr></thead>
-          <tbody>${bodyRows}</tbody>
-        </table>
-      </body>
-    </html>`;
-  return html;
+  const totalCost = rows.reduce((s,r) => s + Number(r.cost||0) * Number(r.qty||1), 0);
+  const totalSell = rows.reduce((s,r) => s + Number(r.line_total||0), 0);
+  const totalProfit = rows.reduce((s,r) => s + Number(r.profit||0), 0);
+  const totalBalance = rows.reduce((s,r) => s + Number(r.balance||0), 0);
+  const totalsRow = `
+    <tr style="font-weight:bold; background:#f5f5f5;">
+      <td colspan="9">TOTALS</td>
+      <td>${totalCost.toFixed(2)}</td>
+      <td></td>
+      <td>${totalSell.toFixed(2)}</td>
+      <td>${totalProfit.toFixed(2)}</td>
+      <td>${Number(totals.sales||0).toFixed(2)}</td>
+      <td>${Number(totals.sales||0).toFixed(2)}</td>
+      <td>${totalBalance.toFixed(2)}</td>
+    </tr>`;
+  return `<html><head><meta charset="utf-8" /></head><body>
+    <h2>${escapeHtml(title)}</h2>
+    <table border="1" cellpadding="4">
+      <thead><tr>${headers.map(h => `<th>${escapeHtml(h)}</th>`).join("")}</tr></thead>
+      <tbody>${bodyRows}${totalsRow}</tbody>
+    </table></body></html>`;
 }
 
-function buildReceiptHtml(receipt) {
-  const receiptText = [
-    "Aura Fits Receipt",
+function buildCsv(rows) {
+  const headers = ["S.No.", "Date/Time", "Customer", "Phone", "Product", "Category", "Size", "Color", "Qty", "Cost Price", "Sell Price", "Total Price", "Profit", "Bill Total", "Balance"];
+  const escape = v => `"${String(v ?? "").replace(/"/g, '""')}"`;
+  const dataRows = rows.map(r => [
+    r.serial_no, r.created_at, r.customer_name, r.customer_phone || "",
+    r.product_name, r.category, r.size, r.color, r.qty,
+    Number(r.cost || 0).toFixed(2), Number(r.price || 0).toFixed(2),
+    Number(r.line_total || 0).toFixed(2), Number(r.profit || 0).toFixed(2),
+    Number(r.sale_total || 0).toFixed(2), Number(r.balance || 0).toFixed(2),
+  ].map(escape).join(","));
+  const totalCost = rows.reduce((s,r) => s + Number(r.cost||0) * Number(r.qty||1), 0);
+  const totalSell = rows.reduce((s,r) => s + Number(r.line_total||0), 0);
+  const totalProfit = rows.reduce((s,r) => s + Number(r.profit||0), 0);
+  const totalBalance = rows.reduce((s,r) => s + Number(r.balance||0), 0);
+  const totalsRow = ["TOTALS","","","","","","","","",
+    totalCost.toFixed(2), "", totalSell.toFixed(2), totalProfit.toFixed(2), totalSell.toFixed(2), totalBalance.toFixed(2)
+  ].map(escape).join(",");
+  return [headers.map(escape).join(","), ...dataRows, totalsRow].join("\r\n");
+}
+
+function buildReceiptText(receipt) {
+  return [
+    "AURA FITS",
     `Receipt #${receipt.saleId}`,
     `Customer: ${receipt.customerName || "Walk-in Customer"}`,
     receipt.customerPhone ? `Phone: ${receipt.customerPhone}` : "",
     `Date: ${receipt.date}`,
     `Payment: ${receipt.payment}`,
-    ...receipt.items.map(item => `${item.name} x${item.qty} - ${rupees(item.lineTotal)}`),
+    "---",
+    ...receipt.items.map(item => `${item.name} x${item.qty}  ${rupees(item.lineTotal)}`),
+    "---",
+    `Subtotal: ${rupees(receipt.subtotal)}`,
+    receipt.discount > 0 ? `Discount (${receipt.discount}%): -${rupees(receipt.discountAmt)}` : "",
     `Total: ${rupees(receipt.total)}`,
+    receipt.amountPaid > 0 ? `Amount Paid: ${rupees(receipt.amountPaid)}` : "",
     receipt.balance > 0 ? `Balance Due: ${rupees(receipt.balance)}` : "",
+    "---",
+    "Thank you for shopping with us!",
   ].filter(Boolean).join("\n");
-  const shareText = encodeURIComponent(receiptText);
-  const mailSubject = encodeURIComponent(`Aura Fits Receipt #${receipt.saleId}`);
-  const itemRows = receipt.items.map(item => `
-    <tr>
-      <td>${escapeHtml(item.name)}</td>
-      <td style="text-align:center">${item.qty}</td>
-      <td style="text-align:right">${rupees(item.unitPrice)}</td>
-      <td style="text-align:right">${rupees(item.lineTotal)}</td>
-    </tr>`).join("");
-  const balanceRow = receipt.balance > 0
-    ? `<div class="line" style="color:#c05f5f;font-weight:600"><span>Balance Due</span><span>${rupees(receipt.balance)}</span></div>`
-    : "";
-  return `
-    <html>
-      <head>
-        <title>Aura Fits Receipt</title>
-        <style>
-          body { font-family: Arial, sans-serif; color: #111; padding: 18px; }
-          h1 { text-align: center; font-size: 22px; margin: 0; letter-spacing: 4px; }
-          .muted { color: #666; font-size: 12px; }
-          table { width: 100%; border-collapse: collapse; margin-top: 14px; font-size: 12px; }
-          th, td { border-bottom: 1px solid #ddd; padding: 7px 4px; }
-          th { text-align: left; }
-          .line { display: flex; justify-content: space-between; margin-top: 8px; font-size: 13px; }
-          .total { font-size: 18px; font-weight: 700; border-top: 1px solid #111; padding-top: 10px; }
-          .share { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; margin-top: 16px; }
-          .share a { border: 1px solid #111; border-radius: 6px; color: #111; display: block; font-size: 12px; padding: 9px; text-align: center; text-decoration: none; }
-        </style>
-      </head>
-      <body>
-        <h1>AURA FITS</h1>
-        <p class="muted" style="text-align:center">Receipt #${escapeHtml(receipt.saleId)} · ${escapeHtml(receipt.date)}</p>
-        <p class="muted">Customer: ${escapeHtml(receipt.customerName || "Walk-in Customer")}${receipt.customerPhone ? ` · 📞 ${escapeHtml(receipt.customerPhone)}` : ""}</p>
-        <p class="muted">Payment: ${escapeHtml(receipt.payment)}</p>
-        <table>
-          <thead><tr><th>Product</th><th>Qty</th><th style="text-align:right">Rate</th><th style="text-align:right">Subtotal</th></tr></thead>
-          <tbody>${itemRows}</tbody>
-        </table>
-        <div class="line"><span>Subtotal</span><span>${rupees(receipt.subtotal)}</span></div>
-        <div class="line"><span>Discount (${receipt.discount}%)</span><span>-${rupees(receipt.discountAmt)}</span></div>
-        <div class="line total"><span>Total</span><span>${rupees(receipt.total)}</span></div>
-        ${balanceRow}
-        <p class="muted" style="text-align:center;margin-top:24px">Thank you for shopping with us.</p>
-        <div class="share">
-          <a href="https://wa.me/?text=${shareText}" target="_blank">WhatsApp</a>
-          <a href="mailto:?subject=${mailSubject}&body=${shareText}">Email</a>
-          <a href="sms:?body=${shareText}">SMS</a>
-        </div>
-      </body>
-    </html>
-  `;
+}
+
+async function generateReceiptPdf(receipt) {
+  // Dynamically load jsPDF from CDN
+  if (!window.jspdf) {
+    await new Promise((resolve, reject) => {
+      const s = document.createElement("script");
+      s.src = "https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js";
+      s.onload = resolve; s.onerror = reject;
+      document.head.appendChild(s);
+    });
+  }
+  const { jsPDF } = window.jspdf;
+  const doc = new jsPDF({ unit: "mm", format: [80, 200], orientation: "portrait" });
+  const lm = 6; let y = 10;
+  doc.setFont("helvetica", "bold");
+  doc.setFontSize(16);
+  doc.text("AURA FITS", 40, y, { align: "center" }); y += 6;
+  doc.setFontSize(8); doc.setFont("helvetica", "normal");
+  doc.text(`Receipt #${receipt.saleId}`, 40, y, { align: "center" }); y += 4;
+  doc.text(receipt.date, 40, y, { align: "center" }); y += 5;
+  doc.setDrawColor(180); doc.line(lm, y, 74, y); y += 4;
+  doc.setFont("helvetica", "bold"); doc.setFontSize(8);
+  doc.text("Customer:", lm, y); doc.setFont("helvetica", "normal");
+  doc.text(receipt.customerName || "Walk-in Customer", lm + 18, y); y += 4;
+  if (receipt.customerPhone) {
+    doc.setFont("helvetica", "bold"); doc.text("Phone:", lm, y); doc.setFont("helvetica", "normal");
+    doc.text(receipt.customerPhone, lm + 18, y); y += 4;
+  }
+  doc.setFont("helvetica", "bold"); doc.text("Payment:", lm, y); doc.setFont("helvetica", "normal");
+  doc.text(receipt.payment, lm + 18, y); y += 5;
+  doc.line(lm, y, 74, y); y += 4;
+  // Items
+  doc.setFont("helvetica", "bold"); doc.setFontSize(7.5);
+  doc.text("Product", lm, y); doc.text("Qty", 50, y); doc.text("Amount", 68, y, { align: "right" }); y += 4;
+  doc.setFont("helvetica", "normal");
+  receipt.items.forEach(item => {
+    const name = item.name.length > 22 ? item.name.slice(0, 22) + "…" : item.name;
+    doc.text(name, lm, y); doc.text(String(item.qty), 50, y); doc.text(rupees(item.lineTotal), 68, y, { align: "right" }); y += 4;
+  });
+  y += 1; doc.line(lm, y, 74, y); y += 4;
+  doc.setFontSize(8);
+  doc.text("Subtotal", lm, y); doc.text(rupees(receipt.subtotal), 74, y, { align: "right" }); y += 4;
+  if (receipt.discount > 0) {
+    doc.setTextColor(180, 60, 60);
+    doc.text(`Discount (${receipt.discount}%)`, lm, y); doc.text(`-${rupees(receipt.discountAmt)}`, 74, y, { align: "right" }); y += 4;
+    doc.setTextColor(0);
+  }
+  doc.setFont("helvetica", "bold"); doc.setFontSize(10);
+  doc.text("TOTAL", lm, y); doc.text(rupees(receipt.total), 74, y, { align: "right" }); y += 5;
+  doc.setFont("helvetica", "normal"); doc.setFontSize(8);
+  if (receipt.amountPaid > 0) {
+    doc.text("Amount Paid", lm, y); doc.text(rupees(receipt.amountPaid), 74, y, { align: "right" }); y += 4;
+  }
+  if (receipt.balance > 0) {
+    doc.setTextColor(180, 60, 60); doc.setFont("helvetica", "bold");
+    doc.text("Balance Due", lm, y); doc.text(rupees(receipt.balance), 74, y, { align: "right" }); y += 4;
+    doc.setTextColor(0); doc.setFont("helvetica", "normal");
+  }
+  y += 2; doc.line(lm, y, 74, y); y += 5;
+  doc.setFontSize(7.5); doc.text("Thank you for shopping with us!", 40, y, { align: "center" });
+  return doc;
 }
 
 
@@ -309,9 +352,11 @@ function LoginPage({ onLogin }) {
   const handleLogin = async () => {
     if (!email || !password) { setError("Please fill in all fields"); return; }
     setLoading(true); setError("");
-    const result = await window.db.login({ email, password });
-    if (result.ok) { onLogin(result.name); }
-    else { setError("Invalid email or password"); setLoading(false); }
+    try {
+      const result = await window.db.login({ email, password });
+      if (result.ok) { onLogin(result.name); }
+      else { setError("Invalid email or password"); setLoading(false); }
+    } catch (e) { setError("Login failed. Please try again."); setLoading(false); }
   };
 
   const handleSignup = async () => {
@@ -319,17 +364,21 @@ function LoginPage({ onLogin }) {
     if (!signupName || !signupEmail || !signupPass || !signupAnswer) { setError("Please fill in all fields"); return; }
     if (signupPass !== signupPass2) { setError("Passwords do not match"); return; }
     if (signupPass.length < 6) { setError("Password must be at least 6 characters"); return; }
-    const result = await window.db.signup({ name: signupName, email: signupEmail, password: signupPass, securityQuestion: signupQ, securityAnswer: signupAnswer });
-    if (result.ok) { setScreen("login"); setEmail(signupEmail); setPassword(""); setError(""); }
-    else { setError(result.error || "Signup failed"); }
+    try {
+      const result = await window.db.signup({ name: signupName, email: signupEmail, password: signupPass, securityQuestion: signupQ, securityAnswer: signupAnswer });
+      if (result.ok) { setScreen("login"); setEmail(signupEmail); setPassword(""); setError(""); }
+      else { setError(result.error || "Signup failed"); }
+    } catch (e) { setError("Signup failed. Please try again."); }
   };
 
   const handleForgotLookup = async () => {
     setError("");
-    const user = await window.db.findUser(forgotEmail);
-    if (!user) { setError("No account found with that email"); return; }
-    setForgotUser({ ...user, email: forgotEmail });
-    setForgotQ(user.securityQuestion);
+    try {
+      const user = await window.db.findUser(forgotEmail);
+      if (!user) { setError("No account found with that email"); return; }
+      setForgotUser({ ...user, email: forgotEmail });
+      setForgotQ(user.securityQuestion);
+    } catch (e) { setError("Failed to look up account. Try again."); }
   };
 
   const handleForgotVerify = () => {
@@ -473,11 +522,12 @@ const NAV_ITEMS = [
   { id: "categories", label: "Categories", icon: "⊞" },
   { id: "reports", label: "Reports & Insights", icon: "▦" },
   { id: "statement", label: "Statement", icon: "≡" },
+  { id: "pending", label: "Pending Balances", icon: "⚠" },
   { id: "expenses", label: "Expenses", icon: "◉" },
   { id: "settings", label: "Settings", icon: "⊛" },
 ];
 
-function Sidebar({ active, setActive, collapsed, setCollapsed, userName }) {
+function Sidebar({ active, setActive, collapsed, setCollapsed, userName, pendingCount }) {
   return (
     <div style={{
       width: collapsed ? 64 : 220, background: "#0D0D0D", borderRight: "1px solid #1a1a1a",
@@ -499,6 +549,7 @@ function Sidebar({ active, setActive, collapsed, setCollapsed, userName }) {
       <nav style={{ flex: 1, paddingTop: 12, overflow: "auto" }}>
         {NAV_ITEMS.map(item => {
           const isActive = active === item.id;
+          const badge = item.id === "pending" && pendingCount > 0 ? pendingCount : null;
           return (
             <div key={item.id} onClick={() => setActive(item.id)} title={collapsed ? item.label : ""} style={{
               display: "flex", alignItems: "center", gap: 12,
@@ -511,8 +562,10 @@ function Sidebar({ active, setActive, collapsed, setCollapsed, userName }) {
               onMouseEnter={e => !isActive && (e.currentTarget.style.background = "#141414")}
               onMouseLeave={e => !isActive && (e.currentTarget.style.background = "transparent")}
             >
-              <span style={{ fontSize: 16, color: isActive ? GOLD : "#444", minWidth: 20, textAlign: "center" }}>{item.icon}</span>
-              {!collapsed && <span style={{ fontSize: 13, color: isActive ? GOLD : "#777", fontWeight: isActive ? 500 : 400, whiteSpace: "nowrap" }}>{item.label}</span>}
+              <span style={{ fontSize: 16, color: item.id === "pending" && pendingCount > 0 ? "#c05f5f" : isActive ? GOLD : "#444", minWidth: 20, textAlign: "center" }}>{item.icon}</span>
+              {!collapsed && <span style={{ fontSize: 13, color: isActive ? GOLD : item.id === "pending" && pendingCount > 0 ? "#c08060" : "#777", fontWeight: isActive ? 500 : 400, whiteSpace: "nowrap", flex: 1 }}>{item.label}</span>}
+              {!collapsed && badge && <span style={{ background: "#c05f5f", color: "#fff", borderRadius: 10, fontSize: 10, fontWeight: 700, padding: "1px 6px", minWidth: 18, textAlign: "center" }}>{badge}</span>}
+              {collapsed && badge && <span style={{ position: "absolute", top: 6, right: 6, background: "#c05f5f", color: "#fff", borderRadius: "50%", fontSize: 9, fontWeight: 700, width: 14, height: 14, display: "flex", alignItems: "center", justifyContent: "center" }}>{badge}</span>}
             </div>
           );
         })}
@@ -540,13 +593,14 @@ function Dashboard() {
   const tooltipStyle = { background: "#141414", border: "1px solid #222", borderRadius: 8, color: "#E8E4D9", fontSize: 12 };
 
   useEffect(() => {
-    window.db.getSalesStats().then(setStats);
-    window.db.getProducts().then(setProducts);
-    window.db.getExpenses().then(setExpenses);
+    window.db.getSalesStats().then(setStats).catch(() => {});
+    window.db.getProducts().then(setProducts).catch(() => {});
+    window.db.getExpenses().then(setExpenses).catch(() => {});
   }, []);
 
   const lowStock = products.filter(p => p.stock <= 5);
-  const monthExpenses = expenses.reduce((s, e) => s + e.amount, 0);
+  const thisMonth = new Date().toISOString().slice(0, 7);
+  const monthExpenses = expenses.filter(e => (e.date || "").slice(0, 7) === thisMonth).reduce((s, e) => s + e.amount, 0);
   const todayStr = new Date().toLocaleDateString("en-IN", { weekday: "long", day: "numeric", month: "long", year: "numeric" });
 
   // Build weekly chart data (Sun=0..Sat=6)
@@ -632,6 +686,7 @@ function POSPage({ addToast }) {
   const [discount, setDiscount] = useState(0);
   const [payment, setPayment] = useState("Cash");
   const [lastReceipt, setLastReceipt] = useState(null);
+  const [checkingOut, setCheckingOut] = useState(false);
   const searchRef = useRef(null);
 
   useEffect(() => {
@@ -646,15 +701,30 @@ function POSPage({ addToast }) {
   );
 
   const addItem = (product) => {
+    if (product.stock <= 0) { addToast(`${product.name} is out of stock`, "error"); return; }
     setCart(prev => {
       const ex = prev.find(i => i.id === product.id);
-      if (ex) return prev.map(i => i.id === product.id ? { ...i, qty: i.qty + 1 } : i);
+      if (ex) {
+        if (ex.qty >= product.stock) { addToast(`Only ${product.stock} in stock`, "error"); return prev; }
+        return prev.map(i => i.id === product.id ? { ...i, qty: i.qty + 1 } : i);
+      }
       return [...prev, { ...product, qty: 1, sellPrice: "" }];
     });
   };
 
   const updateQty = (id, delta) => {
-    setCart(prev => prev.map(i => i.id === id ? { ...i, qty: Math.max(0, i.qty + delta) } : i).filter(i => i.qty > 0));
+    setCart(prev => {
+      const product = products.find(p => p.id === id);
+      return prev.map(i => {
+        if (i.id !== id) return i;
+        const newQty = i.qty + delta;
+        if (delta > 0 && product && newQty > product.stock) {
+          addToast(`Only ${product.stock} in stock`, "error");
+          return i;
+        }
+        return { ...i, qty: Math.max(0, newQty) };
+      }).filter(i => i.qty > 0);
+    });
   };
 
   const updateSellPrice = (id, val) => {
@@ -666,37 +736,44 @@ function POSPage({ addToast }) {
   const total = subtotal - discountAmt;
 
   const checkout = async () => {
+    if (checkingOut) return;
     if (!cart.length) { addToast("Cart is empty", "error"); return; }
     if (cart.some(i => !Number(i.sellPrice))) { addToast("Enter sale price for every product", "error"); return; }
-    const cartToSave = cart.map(i => ({ ...i, price: Number(i.sellPrice) || 0 }));
-    const receiptCustomer = customerName.trim() || "Walk-in Customer";
-    const paid = Number(amountPaid) || 0;
-    const balance = paid > 0 ? Math.max(0, total - paid) : 0;
-    const result = await window.db.recordSale({ cart: cartToSave, total, discount, payment, customerName: receiptCustomer, customerPhone: customerPhone.trim(), amountPaid: paid, balance });
-    if (result.ok) {
-      setLastReceipt({
-        saleId: result.saleId,
-        date: new Date().toLocaleString("en-IN"),
-        customerName: receiptCustomer,
-        customerPhone: customerPhone.trim(),
-        payment,
-        items: cart.map(i => {
-          const unitPrice = Number(i.sellPrice) || 0;
-          return { name: i.name, qty: i.qty, unitPrice, lineTotal: unitPrice * i.qty };
-        }),
-        subtotal,
-        discount,
-        discountAmt,
-        total,
-        amountPaid: paid,
-        balance,
-      });
-      addToast(`Sale of ₹${total.toLocaleString()} recorded via ${payment}`, "success");
-      setCart([]); setDiscount(0); setCustomerName(""); setCustomerPhone(""); setAmountPaid("");
-      // Refresh products to show updated stock
-      window.db.getProducts().then(setProducts);
-    } else {
-      addToast("Failed to record sale", "error");
+    setCheckingOut(true);
+    try {
+      const cartToSave = cart.map(i => ({ ...i, price: Number(i.sellPrice) || 0 }));
+      const receiptCustomer = customerName.trim() || "Walk-in Customer";
+      const paid = Number(amountPaid) || 0;
+      const balance = Math.max(0, total - paid);
+      const result = await window.db.recordSale({ cart: cartToSave, total, discount, payment, customerName: receiptCustomer, customerPhone: customerPhone.trim(), amountPaid: paid, balance });
+      if (result.ok) {
+        setLastReceipt({
+          saleId: result.saleId,
+          date: new Date().toLocaleString("en-IN"),
+          customerName: receiptCustomer,
+          customerPhone: customerPhone.trim(),
+          payment,
+          items: cart.map(i => {
+            const unitPrice = Number(i.sellPrice) || 0;
+            return { name: i.name, qty: i.qty, unitPrice, lineTotal: unitPrice * i.qty };
+          }),
+          subtotal,
+          discount,
+          discountAmt,
+          total,
+          amountPaid: paid,
+          balance,
+        });
+        addToast(`Sale of ₹${total.toLocaleString()} recorded via ${payment}`, "success");
+        setCart([]); setDiscount(0); setCustomerName(""); setCustomerPhone(""); setAmountPaid(""); setPayment("Cash");
+        window.db.getProducts().then(setProducts);
+      } else {
+        addToast("Failed to record sale", "error");
+      }
+    } catch (e) {
+      addToast("Failed to record sale: " + (e?.message || String(e)), "error");
+    } finally {
+      setCheckingOut(false);
     }
   };
 
@@ -807,7 +884,7 @@ function POSPage({ addToast }) {
               }}>{m}</button>
             ))}
           </div>
-          <GoldButton onClick={checkout} style={{ width: "100%", padding: "14px", fontSize: 15 }}>✓ Checkout — ₹{total.toLocaleString()}</GoldButton>
+          <GoldButton onClick={checkout} style={{ width: "100%", padding: "14px", fontSize: 15, opacity: checkingOut ? 0.6 : 1 }}>{checkingOut ? "Processing..." : `✓ Checkout — ₹${total.toLocaleString()}`}</GoldButton>
           {cart.length > 0 && (
             <button onClick={() => setCart([])} style={{ width: "100%", background: "none", border: "none", color: "#444", cursor: "pointer", fontSize: 12, marginTop: 10, padding: "6px" }}>Clear Cart</button>
           )}
@@ -837,33 +914,43 @@ function POSPage({ addToast }) {
               <span>Balance Due</span><span>{rupees(lastReceipt.balance)}</span>
             </div>
           )}
-          <div style={{ marginBottom: 18 }} />
+          <div style={{ marginBottom: 14 }} />
+          {/* Share buttons */}
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 14 }}>
+            <button onClick={() => {
+              const text = encodeURIComponent(buildReceiptText(lastReceipt));
+              window.open(`https://wa.me/?text=${text}`, "_blank");
+            }} style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 8, background: "#1a2d1a", border: "1px solid #25d366", color: "#25d366", borderRadius: 8, padding: "10px", cursor: "pointer", fontSize: 13, fontWeight: 600 }}>
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="#25d366"><path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 01-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 01-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 012.893 6.994c-.003 5.45-4.437 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0012.05 0C5.495 0 .16 5.335.157 11.892c0 2.096.547 4.142 1.588 5.945L.057 24l6.305-1.654a11.882 11.882 0 005.683 1.448h.005c6.554 0 11.89-5.335 11.893-11.893a11.821 11.821 0 00-3.48-8.413Z"/></svg>
+              WhatsApp
+            </button>
+            <button onClick={() => {
+              const text = buildReceiptText(lastReceipt);
+              const subject = encodeURIComponent(`Aura Fits Receipt #${lastReceipt.saleId}`);
+              window.open(`mailto:?subject=${subject}&body=${encodeURIComponent(text)}`, "_self");
+            }} style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 8, background: "#1a1d2d", border: "1px solid #5f7fa0", color: "#5f9fd4", borderRadius: 8, padding: "10px", cursor: "pointer", fontSize: 13, fontWeight: 600 }}>
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#5f9fd4" strokeWidth="2"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"/></svg>
+              Email
+            </button>
+          </div>
           <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
             <GoldButton variant="outline" onClick={() => setLastReceipt(null)}>Close</GoldButton>
-            <GoldButton variant="outline" onClick={async () => {
-              const filePath = await save({
-                defaultPath: `aura-fits-receipt-${lastReceipt.saleId}.html`,
-                filters: [{ name: "Receipt", extensions: ["html"] }],
-              });
-              if (!filePath) return;
-              await writeTextFile(filePath, buildReceiptHtml(lastReceipt));
-              addToast("Receipt saved", "success");
-            }}>Save Receipt</GoldButton>
-            <GoldButton onClick={() => {
-              const receiptText = [
-                "Aura Fits Receipt",
-                `Receipt #${lastReceipt.saleId}`,
-                `Customer: ${lastReceipt.customerName}`,
-                lastReceipt.customerPhone ? `Phone: ${lastReceipt.customerPhone}` : "",
-                `Date: ${lastReceipt.date}`,
-                `Payment: ${lastReceipt.payment}`,
-                ...lastReceipt.items.map(item => `${item.name} x${item.qty} - ${rupees(item.lineTotal)}`),
-                `Total: ${rupees(lastReceipt.total)}`,
-                lastReceipt.balance > 0 ? `Balance Due: ${rupees(lastReceipt.balance)}` : "",
-              ].filter(Boolean).join("\n");
-              const shareUrl = `https://wa.me/?text=${encodeURIComponent(receiptText)}`;
-              window.open(shareUrl, "_blank");
-            }}>Share Receipt</GoldButton>
+            <GoldButton onClick={async () => {
+              try {
+                const doc = await generateReceiptPdf(lastReceipt);
+                const filePath = await save({
+                  defaultPath: `receipt-${lastReceipt.saleId}.pdf`,
+                  filters: [{ name: "PDF", extensions: ["pdf"] }],
+                });
+                if (!filePath) return;
+                const pdfBytes = doc.output("arraybuffer");
+                const { writeBinaryFile } = await import("@tauri-apps/plugin-fs");
+                await writeBinaryFile(filePath, new Uint8Array(pdfBytes));
+                addToast("Receipt saved as PDF", "success");
+              } catch (e) {
+                addToast("Failed to save PDF: " + (e?.message || String(e)), "error");
+              }
+            }}>Save PDF</GoldButton>
           </div>
         </Modal>
       )}
@@ -926,27 +1013,33 @@ function InventoryPage({ addToast }) {
         <GoldButton onClick={openAdd}>+ Add Product</GoldButton>
       </div>
 
-      <Card style={{ marginBottom: 16 }}>
-        <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
-          <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search by name or brand..." style={{ maxWidth: 280 }} />
-          <select value={catFilter} onChange={e => setCatFilter(e.target.value)} style={{ maxWidth: 180 }}>
-            <option>All</option>
-            {categories.map(c => <option key={c.id}>{c.name}</option>)}
-          </select>
-          <span style={{ fontSize: 12, color: "#555" }}>{filtered.length} results</span>
+      <div style={{ marginBottom: 16, display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+        <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search by name or brand..." style={{ maxWidth: 260 }} />
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+          {["All", ...categories.map(c => c.name)].map(cat => (
+            <button key={cat} onClick={() => setCatFilter(cat)} style={{
+              padding: "6px 14px", borderRadius: 20, fontSize: 12, cursor: "pointer", fontWeight: catFilter === cat ? 600 : 400,
+              background: catFilter === cat ? `${GOLD}20` : "transparent",
+              border: `1px solid ${catFilter === cat ? GOLD : "#2a2a2a"}`,
+              color: catFilter === cat ? GOLD : "#666",
+              transition: "all 0.15s",
+            }}>{cat === "All" ? `All (${products.length})` : `${categories.find(c=>c.name===cat)?.icon||""} ${cat} (${products.filter(p=>p.category===cat).length})`}</button>
+          ))}
         </div>
-      </Card>
+        <span style={{ fontSize: 12, color: "#555", marginLeft: 4 }}>{filtered.length} results</span>
+      </div>
 
       <Card>
         <Table
-          headers={["Product Name", "Category", "Brand", "Size", "Color", "Cost", "Stock"]}
+          headers={["Product Name", "Category", "Brand", "Size", "Color", "Cost Price", "Sell Price", "Stock"]}
           rows={filtered.map(p => [
             <span style={{ color: "#E8E4D9", fontWeight: 500 }}>{p.name}</span>,
             <Badge>{p.category}</Badge>,
             p.brand, p.size, p.color,
             `₹${p.cost.toLocaleString()}`,
-            <span style={{ color: p.stock <= 3 ? "#c05f5f" : p.stock <= 7 ? "#c08060" : "#5fa05f", fontWeight: 500 }}>
-              {p.stock <= 5 ? `⚠ Only ${p.stock}` : p.stock}
+            `₹${(p.price || p.cost).toLocaleString()}`,
+            <span style={{ color: p.stock <= 0 ? "#c05f5f" : p.stock <= 3 ? "#c05f5f" : p.stock <= 7 ? "#c08060" : "#5fa05f", fontWeight: 500 }}>
+              {p.stock <= 0 ? "✕ Out of Stock" : p.stock <= 5 ? `⚠ Only ${p.stock}` : p.stock}
             </span>
           ])}
           onEdit={openEdit}
@@ -1069,13 +1162,14 @@ function ReportsPage() {
   const tooltipStyle = { background: "#141414", border: "1px solid #222", borderRadius: 8, color: "#E8E4D9", fontSize: 12 };
 
   useEffect(() => {
-    window.db.getTodaySales().then(setTodaySales);
-    window.db.getSalesStats().then(setStats);
-    window.db.getExpenses().then(setExpenses);
+    window.db.getTodaySales().then(setTodaySales).catch(() => {});
+    window.db.getSalesStats().then(setStats).catch(() => {});
+    window.db.getExpenses().then(setExpenses).catch(() => {});
   }, []);
 
-  const monthExpenses = expenses.reduce((s, e) => s + e.amount, 0);
-  const profit = (stats.month?.total || 0) - monthExpenses;
+  const thisMonth = new Date().toISOString().slice(0, 7);
+  const monthExpenses = expenses.filter(e => (e.date || "").slice(0, 7) === thisMonth).reduce((s, e) => s + e.amount, 0);
+  const profit = stats.real_profit !== undefined ? stats.real_profit - monthExpenses : (stats.month?.total || 0) - monthExpenses;
 
   const dayNames = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
   const weeklyChart = dayNames.map((day, i) => {
@@ -1094,7 +1188,7 @@ function ReportsPage() {
         <StatCard label="Today's Revenue" value={`₹${(stats.today?.total || 0).toLocaleString()}`} sub={`${stats.today?.count || 0} sales`} />
         <StatCard label="Monthly Revenue" value={`₹${(stats.month?.total || 0).toLocaleString()}`} color="#E8E4D9" />
         <StatCard label="Monthly Expenses" value={`₹${monthExpenses.toLocaleString()}`} color="#c08060" />
-        <StatCard label="Est. Profit" value={`₹${profit.toLocaleString()}`} color={profit >= 0 ? "#5fa05f" : "#c05f5f"} />
+        <StatCard label="Real Profit" value={`₹${profit.toLocaleString()}`} color={profit >= 0 ? "#5fa05f" : "#c05f5f"} />
       </div>
 
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, marginBottom: 16 }}>
@@ -1132,97 +1226,380 @@ function ReportsPage() {
 }
 
 // ─── STATEMENT ───────────────────────────────────────────────────────────────
-function StatementPage({ addToast }) {
+function StatementPage({ addToast, onRefreshPending }) {
+  const [tab, setTab] = useState("sales"); // "sales" | "pending"
   const [fromDate, setFromDate] = useState(todayDate());
   const [toDate, setToDate] = useState(todayDate());
   const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(false);
+  const [editSale, setEditSale] = useState(null);
+  const [editForm, setEditForm] = useState(null);
+  const [products, setProducts] = useState([]);
+  const [confirmDeleteId, setConfirmDeleteId] = useState(null);
+  const [pending, setPending] = useState([]);
+  const [payModal, setPayModal] = useState(null); // { sale } for updating balance
 
   const load = async () => {
     if (!fromDate || !toDate) { addToast("Choose both dates", "error"); return; }
     if (fromDate > toDate) { addToast("From date cannot be after To date", "error"); return; }
     setLoading(true);
-    try {
-      setRows(await window.db.getStatement(fromDate, toDate));
-    } catch (error) {
-      addToast(error?.message || "Failed to load statement", "error");
-    } finally {
-      setLoading(false);
-    }
+    try { setRows(await window.db.getStatement(fromDate, toDate)); }
+    catch (e) { addToast(e?.message || "Failed to load statement", "error"); }
+    finally { setLoading(false); }
   };
 
-  useEffect(() => {
-    load();
-  }, []);
+  const loadPending = () => window.db.getPendingBalances().then(setPending).catch(() => {});
 
+  useEffect(() => { load(); window.db.getProducts().then(setProducts); loadPending(); }, []);
+
+  // Group rows by sale_id
+  const salesMap = {};
+  rows.forEach(r => {
+    if (!salesMap[r.sale_id]) salesMap[r.sale_id] = { ...r, items: [] };
+    if (r.product_name) salesMap[r.sale_id].items.push(r);
+  });
+  const sales = Object.values(salesMap);
   const saleIds = new Set(rows.map(r => r.sale_id));
-  const totalSales = [...saleIds].reduce((sum, id) => {
-    const sale = rows.find(r => r.sale_id === id);
-    return sum + (sale?.sale_total || 0);
-  }, 0);
-  const productSubtotals = rows.reduce((sum, r) => sum + (r.line_total || 0), 0);
+  const totalSales = [...saleIds].reduce((sum, id) => sum + (salesMap[id]?.sale_total || 0), 0);
   const totalProfit = rows.reduce((sum, r) => sum + (r.profit || 0), 0);
+  const totalBalance = [...saleIds].reduce((sum, id) => sum + (salesMap[id]?.balance || 0), 0);
 
-  const exportExcel = async () => {
-    if (!rows.length) { addToast("No statement data to export", "error"); return; }
+  const openEdit = (sale) => {
+    setEditSale(sale);
+    setEditForm({
+      customerName: sale.customer_name,
+      customerPhone: sale.customer_phone || "",
+      payment: sale.payment,
+      discount: sale.discount || 0,
+      amountPaid: sale.amount_paid || 0,
+      balance: sale.balance || 0,
+      cart: sale.items.map(i => ({
+        id: i.product_id || 0, name: i.product_name, category: i.category,
+        size: i.size, color: i.color, cost: i.cost, qty: i.qty, price: i.price,
+        sellPrice: String(i.price ?? ""),
+      })),
+    });
+  };
+
+  const saveEdit = async () => {
+    if (!editForm.cart.length) { addToast("Add at least one product", "error"); return; }
+    const cart = editForm.cart.map(i => ({ ...i, price: Number(i.sellPrice) || i.price }));
+    const subtotal = cart.reduce((s, i) => s + (Number(i.sellPrice) || i.price) * i.qty, 0);
+    const discountAmt = Math.round(subtotal * editForm.discount / 100);
+    const total = subtotal - discountAmt;
+    const paid = Number(editForm.amountPaid) || 0;
+    const balance = Math.max(0, total - paid);
+    try {
+      await window.db.updateSale({ id: editSale.sale_id, customerName: editForm.customerName, customerPhone: editForm.customerPhone, payment: editForm.payment, discount: editForm.discount, amountPaid: paid, balance, total, cart });
+      addToast("Sale updated", "success");
+      setEditSale(null); setEditForm(null); load(); loadPending(); onRefreshPending?.();
+    } catch (e) { addToast("Failed to update: " + (e?.message || String(e)), "error"); }
+  };
+
+  const doDelete = async (id) => {
+    try {
+      await window.db.deleteSale(id);
+      addToast("Sale deleted, stock restored", "success");
+      setConfirmDeleteId(null); load(); loadPending();
+    } catch (e) { addToast("Failed to delete: " + (e?.message || String(e)), "error"); }
+  };
+
+  const [showExportMenu, setShowExportMenu] = useState(false);
+  const exportRef = useRef(null);
+  useEffect(() => {
+    if (!showExportMenu) return;
+    const handler = (e) => { if (exportRef.current && !exportRef.current.contains(e.target)) setShowExportMenu(false); };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [showExportMenu]);
+
+  const doExport = async (format) => {
+    setShowExportMenu(false);
+    if (!rows.length) { addToast("No data to export", "error"); return; }
+    const isCSV = format === "csv";
+    const ext = isCSV ? "csv" : "xls";
+    const filterName = isCSV ? "CSV (Numbers / Excel)" : "Excel Workbook";
     const filePath = await save({
-      defaultPath: `aura-fits-statement-${fromDate}-to-${toDate}.xls`,
-      filters: [{ name: "Excel Workbook", extensions: ["xls"] }],
+      defaultPath: `aura-fits-statement-${fromDate}-to-${toDate}.${ext}`,
+      filters: [{ name: filterName, extensions: [ext] }],
     });
     if (!filePath) return;
-    const html = buildExcelHtml(`Aura Fits Statement (${fromDate} to ${toDate})`, rows, { sales: totalSales, subtotal: productSubtotals });
-    await writeTextFile(filePath, html);
-    addToast("Statement exported for Excel", "success");
+    const content = isCSV
+      ? buildCsv(rows)
+      : buildExcelHtml(`Aura Fits Statement (${fromDate} to ${toDate})`, rows, { sales: totalSales });
+    await writeTextFile(filePath, content);
+    addToast(`Exported as .${ext.toUpperCase()}`, "success");
   };
+
+  const tabBtn = (id, label, badge) => (
+    <button onClick={() => setTab(id)} style={{
+      padding: "8px 20px", borderRadius: 8, fontSize: 13, cursor: "pointer", fontWeight: tab === id ? 600 : 400,
+      background: tab === id ? `${GOLD}20` : "transparent",
+      border: `1px solid ${tab === id ? GOLD : "#2a2a2a"}`,
+      color: tab === id ? GOLD : "#666", display: "flex", alignItems: "center", gap: 8,
+    }}>
+      {label}
+      {badge > 0 && <span style={{ background: "#c05f5f", color: "#fff", borderRadius: 10, fontSize: 10, fontWeight: 700, padding: "1px 7px" }}>{badge}</span>}
+    </button>
+  );
 
   return (
     <div className="fade-in">
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 24 }}>
         <div>
           <h1 style={{ fontFamily: "'Cormorant Garamond', serif", fontSize: 28, fontWeight: 300, color: "#E8E4D9" }}>Statement</h1>
-          <p style={{ color: "#555", fontSize: 13, marginTop: 4 }}>Sales export by date range</p>
+          <p style={{ color: "#555", fontSize: 13, marginTop: 4 }}>Sales records & pending balances</p>
         </div>
-        <GoldButton onClick={exportExcel}>Export Excel</GoldButton>
+        <div style={{ position: "relative" }}>
+          <GoldButton onClick={() => setShowExportMenu(m => !m)}>Export ▾</GoldButton>
+          {showExportMenu && (
+            <div ref={exportRef} style={{ position: "absolute", right: 0, top: "110%", background: "#1a1a1a", border: "1px solid #2a2a2a", borderRadius: 10, zIndex: 200, minWidth: 210, overflow: "hidden", boxShadow: "0 8px 32px rgba(0,0,0,0.5)" }}>
+              <button onClick={() => doExport("xls")} style={{ width: "100%", background: "none", border: "none", color: "#E8E4D9", padding: "12px 18px", textAlign: "left", cursor: "pointer", fontSize: 13, display: "flex", alignItems: "center", gap: 10 }}
+                onMouseEnter={e => e.currentTarget.style.background = "#222"}
+                onMouseLeave={e => e.currentTarget.style.background = "none"}>
+                <span style={{ fontSize: 18 }}>📊</span>
+                <div><p style={{ fontWeight: 600, marginBottom: 2 }}>Excel (.xls)</p><p style={{ fontSize: 11, color: "#555" }}>For Windows — Microsoft Excel</p></div>
+              </button>
+              <div style={{ height: 1, background: "#222" }} />
+              <button onClick={() => doExport("csv")} style={{ width: "100%", background: "none", border: "none", color: "#E8E4D9", padding: "12px 18px", textAlign: "left", cursor: "pointer", fontSize: 13, display: "flex", alignItems: "center", gap: 10 }}
+                onMouseEnter={e => e.currentTarget.style.background = "#222"}
+                onMouseLeave={e => e.currentTarget.style.background = "none"}>
+                <span style={{ fontSize: 18 }}>🍎</span>
+                <div><p style={{ fontWeight: 600, marginBottom: 2 }}>CSV (.csv)</p><p style={{ fontSize: 11, color: "#555" }}>For Mac — Numbers / Excel</p></div>
+              </button>
+            </div>
+          )}
+        </div>
       </div>
 
-      <Card style={{ marginBottom: 16 }}>
-        <div style={{ display: "grid", gridTemplateColumns: "180px 180px auto", gap: 12, alignItems: "end" }}>
-          <FormField label="From Date"><input type="date" value={fromDate} onChange={e => setFromDate(e.target.value)} /></FormField>
-          <FormField label="To Date"><input type="date" value={toDate} onChange={e => setToDate(e.target.value)} /></FormField>
-          <GoldButton onClick={load} style={{ marginBottom: 16, width: 120 }}>{loading ? "Loading..." : "Apply"}</GoldButton>
-        </div>
-      </Card>
-
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 14, marginBottom: 16 }}>
-        <StatCard label="Bills" value={saleIds.size} sub="in selected range" />
-        <StatCard label="Sales Total" value={rupees(totalSales)} color="#E8E4D9" />
-        <StatCard label="Profit" value={rupees(totalProfit)} color={totalProfit >= 0 ? "#5fa05f" : "#c05f5f"} />
+      {/* Tabs */}
+      <div style={{ display: "flex", gap: 8, marginBottom: 20 }}>
+        {tabBtn("sales", "All Sales")}
+        {tabBtn("pending", "Pending Balances", pending.length)}
       </div>
 
-      <Card>
-        {rows.length === 0
-          ? <p style={{ color: "#555", fontSize: 13, padding: "20px 0" }}>No sales found for this date range.</p>
-          : <Table
-              headers={["S.No.", "Date/Time", "Customer", "Product", "Category", "Size", "Color", "Cost", "Sell", "Profit", "Total"]}
-              rows={rows.map(r => [
-                r.serial_no,
-                r.created_at?.slice(0, 16) || "",
-                r.customer_name || "Walk-in Customer",
-                r.product_name,
-                r.category,
-                r.size,
-                r.color,
-                rupees(r.cost),
-                rupees(r.price),
-                <span style={{ color: r.profit >= 0 ? "#5fa05f" : "#c05f5f", fontWeight: 500 }}>{rupees(r.profit)}</span>,
-                <span style={{ color: GOLD, fontWeight: 500 }}>{rupees(r.line_total)}</span>,
-              ])}
-            />
-        }
-      </Card>
+      {tab === "sales" && (<>
+        <Card style={{ marginBottom: 16 }}>
+          <div style={{ display: "grid", gridTemplateColumns: "180px 180px auto", gap: 12, alignItems: "end" }}>
+            <FormField label="From Date"><input type="date" value={fromDate} onChange={e => setFromDate(e.target.value)} /></FormField>
+            <FormField label="To Date"><input type="date" value={toDate} onChange={e => setToDate(e.target.value)} /></FormField>
+            <GoldButton onClick={load} style={{ marginBottom: 16, width: 120 }}>{loading ? "Loading..." : "Apply"}</GoldButton>
+          </div>
+        </Card>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 14, marginBottom: 16 }}>
+          <StatCard label="Bills" value={saleIds.size} sub="in selected range" />
+          <StatCard label="Sales Total" value={rupees(totalSales)} color="#E8E4D9" />
+          <StatCard label="Profit" value={rupees(totalProfit)} color={totalProfit >= 0 ? "#5fa05f" : "#c05f5f"} />
+          <StatCard label="Pending Balance" value={rupees(totalBalance)} color={totalBalance > 0 ? "#c05f5f" : "#5fa05f"} />
+        </div>
+        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+          {sales.length === 0
+            ? <Card><p style={{ color: "#555", fontSize: 13, padding: "20px 0" }}>No sales found for this date range.</p></Card>
+            : sales.map(sale => (
+              <Card key={sale.sale_id} style={{ padding: 0, overflow: "hidden" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", padding: "14px 18px", borderBottom: "1px solid #1a1a1a", background: "#111" }}>
+                  <div>
+                    <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 4 }}>
+                      <span style={{ fontSize: 12, color: GOLD, fontWeight: 600 }}>Bill #{sale.sale_id}</span>
+                      <Badge color={sale.payment === "Cash" ? "#5fa05f" : sale.payment === "UPI" ? "#5f8fa0" : GOLD_DIM}>{sale.payment}</Badge>
+                      {sale.balance > 0 && <Badge color="#c05f5f">⚠ Balance: {rupees(sale.balance)}</Badge>}
+                    </div>
+                    <p style={{ fontSize: 12, color: "#555" }}>{sale.created_at?.slice(0, 16) || ""}</p>
+                  </div>
+                  <div style={{ textAlign: "right" }}>
+                    <p style={{ fontSize: 18, color: GOLD, fontWeight: 700 }}>{rupees(sale.sale_total)}</p>
+                    <div style={{ display: "flex", gap: 6, marginTop: 6, justifyContent: "flex-end" }}>
+                      <button onClick={() => openEdit(sale)} style={{ background: "none", border: "1px solid #2a2a2a", color: "#888", borderRadius: 6, padding: "4px 12px", cursor: "pointer", fontSize: 11 }}>Edit</button>
+                      <button onClick={() => setConfirmDeleteId(sale.sale_id)} style={{ background: "none", border: "1px solid #3d1a1a", color: "#c05f5f", borderRadius: 6, padding: "4px 12px", cursor: "pointer", fontSize: 11 }}>Delete</button>
+                    </div>
+                  </div>
+                </div>
+                <div style={{ display: "flex", gap: 24, padding: "10px 18px", borderBottom: "1px solid #161616", background: "#0f0f0f" }}>
+                  <div><span style={{ fontSize: 10, color: "#555", textTransform: "uppercase", letterSpacing: "0.08em" }}>Customer</span><p style={{ fontSize: 13, color: "#C8C4B8", marginTop: 2 }}>{sale.customer_name || "Walk-in"}</p></div>
+                  {sale.customer_phone && <div><span style={{ fontSize: 10, color: "#555", textTransform: "uppercase", letterSpacing: "0.08em" }}>Phone</span><p style={{ fontSize: 13, color: "#C8C4B8", marginTop: 2 }}>📞 {sale.customer_phone}</p></div>}
+                  {sale.discount > 0 && <div><span style={{ fontSize: 10, color: "#555", textTransform: "uppercase", letterSpacing: "0.08em" }}>Discount</span><p style={{ fontSize: 13, color: "#c05f5f", marginTop: 2 }}>{sale.discount}%</p></div>}
+                  {sale.amount_paid > 0 && <div><span style={{ fontSize: 10, color: "#555", textTransform: "uppercase", letterSpacing: "0.08em" }}>Paid</span><p style={{ fontSize: 13, color: "#5fa05f", marginTop: 2 }}>{rupees(sale.amount_paid)}</p></div>}
+                  {sale.balance > 0 && <div><span style={{ fontSize: 10, color: "#555", textTransform: "uppercase", letterSpacing: "0.08em" }}>Balance Due</span><p style={{ fontSize: 13, color: "#c05f5f", fontWeight: 700, marginTop: 2 }}>{rupees(sale.balance)}</p></div>}
+                </div>
+                <div style={{ padding: "0 18px" }}>
+                  <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+                    <thead><tr>{["Product","Category","Size","Color","Qty","Cost","Sell","Total","Profit"].map(h=><th key={h} style={{ textAlign:"left", padding:"8px 6px", color:"#444", fontWeight:500, fontSize:10, letterSpacing:"0.08em", textTransform:"uppercase", borderBottom:"1px solid #1a1a1a" }}>{h}</th>)}</tr></thead>
+                    <tbody>
+                      {sale.items.map((item,i)=>(
+                        <tr key={i} style={{ borderBottom:"1px solid #111" }}>
+                          <td style={{ padding:"8px 6px", color:"#C8C4B8", fontWeight:500 }}>{item.product_name}</td>
+                          <td style={{ padding:"8px 6px" }}><Badge>{item.category}</Badge></td>
+                          <td style={{ padding:"8px 6px", color:"#666" }}>{item.size}</td>
+                          <td style={{ padding:"8px 6px", color:"#666" }}>{item.color}</td>
+                          <td style={{ padding:"8px 6px", color:"#888" }}>{item.qty}</td>
+                          <td style={{ padding:"8px 6px", color:"#666" }}>{rupees(item.cost)}</td>
+                          <td style={{ padding:"8px 6px", color:"#C8C4B8" }}>{rupees(item.price)}</td>
+                          <td style={{ padding:"8px 6px", color:GOLD, fontWeight:600 }}>{rupees(item.line_total)}</td>
+                          <td style={{ padding:"8px 6px", color:item.profit>=0?"#5fa05f":"#c05f5f", fontWeight:500 }}>{rupees(item.profit)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </Card>
+            ))
+          }
+        </div>
+      </>)}
+
+      {tab === "pending" && (
+        <div>
+          {pending.length === 0
+            ? <Card><p style={{ color: "#5fa05f", fontSize: 14, padding: "28px 0", textAlign: "center" }}>✓ No pending balances — all customers are settled!</p></Card>
+            : <>
+              <div style={{ background: "#2d1a1a", border: "1px solid #5c2d2d", borderRadius: 10, padding: "12px 18px", marginBottom: 16, display: "flex", alignItems: "center", gap: 10 }}>
+                <span style={{ fontSize: 18 }}>⚠</span>
+                <div>
+                  <p style={{ fontSize: 13, color: "#c05f5f", fontWeight: 600 }}>{pending.length} customer{pending.length > 1 ? "s" : ""} with pending balance</p>
+                  <p style={{ fontSize: 12, color: "#944" }}>Total outstanding: {rupees(pending.reduce((s,p)=>s+p.balance,0))}</p>
+                </div>
+              </div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                {pending.map(p => (
+                  <Card key={p.sale_id} style={{ padding: 0, overflow: "hidden", border: "1px solid #3d1a1a" }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "14px 18px", background: "#111" }}>
+                      <div>
+                        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 4 }}>
+                          <span style={{ fontSize: 13, color: "#E8E4D9", fontWeight: 600 }}>{p.customer_name}</span>
+                          {p.customer_phone && <span style={{ fontSize: 12, color: "#555" }}>📞 {p.customer_phone}</span>}
+                          <Badge color="#c05f5f">Bill #{p.sale_id}</Badge>
+                        </div>
+                        <p style={{ fontSize: 11, color: "#555" }}>{p.created_at?.slice(0, 16)} · {p.payment}</p>
+                        <p style={{ fontSize: 12, color: "#666", marginTop: 4 }}>{p.items_summary}</p>
+                      </div>
+                      <div style={{ textAlign: "right" }}>
+                        <p style={{ fontSize: 11, color: "#555" }}>Bill Total: {rupees(p.sale_total)}</p>
+                        <p style={{ fontSize: 11, color: "#5fa05f" }}>Paid: {rupees(p.amount_paid)}</p>
+                        <p style={{ fontSize: 18, color: "#c05f5f", fontWeight: 700, marginTop: 4 }}>{rupees(p.balance)} due</p>
+                        <button onClick={() => setPayModal(p)} style={{ marginTop: 8, background: `${GOLD}20`, border: `1px solid ${GOLD}`, color: GOLD, borderRadius: 6, padding: "6px 14px", cursor: "pointer", fontSize: 12, fontWeight: 600 }}>Update Payment</button>
+                      </div>
+                    </div>
+                  </Card>
+                ))}
+              </div>
+            </>
+          }
+        </div>
+      )}
+
+      {/* Update Payment Modal */}
+      {payModal && (
+        <Modal title={`Update Payment — Bill #${payModal.sale_id}`} onClose={() => setPayModal(null)} width={420}>
+          <div style={{ background: "#0d0d0d", borderRadius: 10, padding: 14, marginBottom: 16, border: "1px solid #1e1e1e" }}>
+            <p style={{ fontSize: 13, color: "#C8C4B8" }}>{payModal.customer_name} {payModal.customer_phone ? `· 📞 ${payModal.customer_phone}` : ""}</p>
+            <p style={{ fontSize: 12, color: "#555", marginTop: 4 }}>{payModal.items_summary}</p>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12, marginTop: 12 }}>
+              <div><p style={{ fontSize: 10, color: "#555", textTransform: "uppercase" }}>Bill Total</p><p style={{ fontSize: 14, color: "#E8E4D9", fontWeight: 600, marginTop: 2 }}>{rupees(payModal.sale_total)}</p></div>
+              <div><p style={{ fontSize: 10, color: "#555", textTransform: "uppercase" }}>Already Paid</p><p style={{ fontSize: 14, color: "#5fa05f", fontWeight: 600, marginTop: 2 }}>{rupees(payModal.amount_paid)}</p></div>
+              <div><p style={{ fontSize: 10, color: "#555", textTransform: "uppercase" }}>Balance Due</p><p style={{ fontSize: 14, color: "#c05f5f", fontWeight: 700, marginTop: 2 }}>{rupees(payModal.balance)}</p></div>
+            </div>
+          </div>
+          <PaymentUpdater sale={payModal} addToast={addToast} onDone={() => { setPayModal(null); loadPending(); load(); }} />
+        </Modal>
+      )}
+
+      {/* Edit Sale Modal */}
+      {editSale && editForm && (
+        <Modal title={`Edit Bill #${editSale.sale_id}`} onClose={() => { setEditSale(null); setEditForm(null); }} width={600}>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 16 }}>
+            <FormField label="Customer Name"><input value={editForm.customerName} onChange={e => setEditForm(f => ({ ...f, customerName: e.target.value }))} /></FormField>
+            <FormField label="Customer Phone"><input value={editForm.customerPhone} onChange={e => setEditForm(f => ({ ...f, customerPhone: e.target.value }))} type="tel" /></FormField>
+            <FormField label="Payment">
+              <select value={editForm.payment} onChange={e => setEditForm(f => ({ ...f, payment: e.target.value }))}>
+                {["Cash", "UPI", "Card"].map(m => <option key={m}>{m}</option>)}
+              </select>
+            </FormField>
+            <FormField label="Discount %"><input type="number" value={editForm.discount} onChange={e => setEditForm(f => ({ ...f, discount: Number(e.target.value) }))} min={0} /></FormField>
+            <FormField label="Amount Paid ₹"><input type="number" value={editForm.amountPaid} onChange={e => setEditForm(f => ({ ...f, amountPaid: e.target.value }))} min={0} /></FormField>
+          </div>
+          <p style={{ fontSize: 12, color: GOLD, marginBottom: 10, fontWeight: 600 }}>Products in this sale</p>
+          {editForm.cart.map((item, i) => (
+            <div key={i} style={{ display: "grid", gridTemplateColumns: "1fr 80px 80px auto", gap: 8, marginBottom: 8, alignItems: "center" }}>
+              <span style={{ fontSize: 13, color: "#C8C4B8" }}>{item.name}</span>
+              <input type="number" value={item.qty ?? 1} min={1} onChange={e => setEditForm(f => ({ ...f, cart: f.cart.map((c,j) => j===i ? {...c, qty: Number(e.target.value)} : c) }))} placeholder="Qty" style={{ textAlign: "center" }} />
+              <input type="number" value={item.sellPrice ?? item.price} onChange={e => setEditForm(f => ({ ...f, cart: f.cart.map((c,j) => j===i ? {...c, sellPrice: e.target.value} : c) }))} placeholder="Price" style={{ textAlign: "right" }} />
+              <button onClick={() => setEditForm(f => ({ ...f, cart: f.cart.filter((_,j) => j!==i) }))} style={{ background: "none", border: "1px solid #3d1a1a", color: "#c05f5f", borderRadius: 6, padding: "6px 10px", cursor: "pointer", fontSize: 11 }}>✕</button>
+            </div>
+          ))}
+          <FormField label="Add Product">
+            <select onChange={e => {
+              const p = products.find(p => p.id === Number(e.target.value));
+              if (!p) return;
+              setEditForm(f => ({ ...f, cart: [...f.cart, { id: p.id, name: p.name, category: p.category, size: p.size, color: p.color, cost: p.cost, qty: 1, price: p.price, sellPrice: String(p.price) }] }));
+              e.target.value = "";
+            }} defaultValue="">
+              <option value="">— Select product to add —</option>
+              {products.map(p => <option key={p.id} value={p.id}>{p.name} (Stock: {p.stock})</option>)}
+            </select>
+          </FormField>
+          <div style={{ display: "flex", gap: 10, justifyContent: "flex-end", marginTop: 16 }}>
+            <GoldButton variant="outline" onClick={() => { setEditSale(null); setEditForm(null); }}>Cancel</GoldButton>
+            <GoldButton onClick={saveEdit}>Save Changes</GoldButton>
+          </div>
+        </Modal>
+      )}
+
+      {confirmDeleteId !== null && (
+        <Modal title="Delete Sale" onClose={() => setConfirmDeleteId(null)} width={380}>
+          <p style={{ fontSize: 13, color: "#888", marginBottom: 8 }}>Delete Bill <strong style={{ color: "#E8E4D9" }}>#{confirmDeleteId}</strong>?</p>
+          <p style={{ fontSize: 12, color: "#5fa05f", marginBottom: 24 }}>✓ All products will be returned to inventory automatically.</p>
+          <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
+            <GoldButton variant="outline" onClick={() => setConfirmDeleteId(null)}>Cancel</GoldButton>
+            <button onClick={() => doDelete(confirmDeleteId)} style={{ background: "#2d1a1a", border: "1px solid #5c2d2d", color: "#c05f5f", borderRadius: 8, padding: "10px 22px", cursor: "pointer", fontSize: 14 }}>Delete & Restore Stock</button>
+          </div>
+        </Modal>
+      )}
     </div>
   );
 }
+
+// Payment updater sub-component
+function PaymentUpdater({ sale, addToast, onDone }) {
+  const [newPayment, setNewPayment] = useState("");
+  const remaining = sale.balance;
+  const newPaid = Number(newPayment) || 0;
+  const newBalance = Math.max(0, remaining - newPaid);
+  const totalPaid = sale.amount_paid + newPaid;
+
+  const submit = async () => {
+    if (!newPayment || newPaid <= 0) { addToast("Enter amount received", "error"); return; }
+    if (newPaid > remaining) { addToast("Amount exceeds balance due", "error"); return; }
+    try {
+      await window.db.updateBalance(sale.sale_id, totalPaid, newBalance);
+      addToast(newBalance === 0 ? "Balance fully cleared ✓" : `Payment recorded. Remaining: ₹${newBalance.toLocaleString()}`, "success");
+      onDone();
+    } catch (e) { addToast("Failed: " + (e?.message || String(e)), "error"); }
+  };
+
+  return (
+    <div>
+      <FormField label="Amount Received Now ₹">
+        <input type="number" value={newPayment} onChange={e => setNewPayment(e.target.value)} placeholder={`Up to ₹${remaining.toLocaleString()}`} min={0} max={remaining} autoFocus />
+      </FormField>
+      {newPayment && (
+        <div style={{ background: newBalance === 0 ? "#1a2d1a" : "#2d1a1a", border: `1px solid ${newBalance === 0 ? "#2d5c2d" : "#5c2d2d"}`, borderRadius: 8, padding: "10px 14px", marginBottom: 16 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, marginBottom: 4 }}>
+            <span style={{ color: "#888" }}>Total Paid After</span>
+            <span style={{ color: "#5fa05f", fontWeight: 600 }}>{rupees(totalPaid)}</span>
+          </div>
+          <div style={{ display: "flex", justifyContent: "space-between", fontSize: 14 }}>
+            <span style={{ color: "#888" }}>Remaining Balance</span>
+            <span style={{ color: newBalance === 0 ? "#5fa05f" : "#c05f5f", fontWeight: 700 }}>{newBalance === 0 ? "✓ Cleared" : rupees(newBalance)}</span>
+          </div>
+        </div>
+      )}
+      <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
+        <GoldButton onClick={submit}>Record Payment</GoldButton>
+      </div>
+    </div>
+  );
+}
+
 
 // ─── EXPENSES ────────────────────────────────────────────────────────────────
 function ExpensesPage({ addToast }) {
@@ -1312,7 +1689,13 @@ function ExpensesPage({ addToast }) {
 // ─── SETTINGS ────────────────────────────────────────────────────────────────
 function SettingsPage({ addToast, onLogout }) {
   const [settings, setSettings] = useState({ shopName: "Aura Fits", currency: "INR", address: "", phone: "" });
-  const save = () => addToast("Settings saved", "success");
+  useEffect(() => {
+    try { const s = localStorage.getItem("aura_settings"); if (s) setSettings(JSON.parse(s)); } catch {}
+  }, []);
+  const save = () => {
+    try { localStorage.setItem("aura_settings", JSON.stringify(settings)); } catch {}
+    addToast("Settings saved", "success");
+  };
 
   return (
     <div className="fade-in">
@@ -1350,6 +1733,148 @@ function SettingsPage({ addToast, onLogout }) {
   );
 }
 
+// ─── PENDING BALANCES ─────────────────────────────────────────────────────────
+function PendingBalancesPage({ addToast, onRefreshPending }) {
+  const [pending, setPending] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [updateModal, setUpdateModal] = useState(null); // { sale }
+  const [newPayment, setNewPayment] = useState("");
+
+  const load = async () => {
+    setLoading(true);
+    try { setPending(await window.db.getPendingBalances()); }
+    catch (e) { addToast("Failed to load pending balances", "error"); }
+    finally { setLoading(false); }
+  };
+
+  useEffect(() => { load(); }, []);
+
+  const openUpdate = (sale) => {
+    setUpdateModal(sale);
+    setNewPayment("");
+  };
+
+  const savePayment = async () => {
+    if (!updateModal) return;
+    const extra = Number(newPayment) || 0;
+    if (extra <= 0) { addToast("Enter a valid payment amount", "error"); return; }
+    const newPaid = (updateModal.amount_paid || 0) + extra;
+    const newBalance = Math.max(0, (updateModal.sale_total || 0) - newPaid);
+    try {
+      await window.db.updateBalance(updateModal.sale_id, newPaid, newBalance);
+      addToast(newBalance === 0 ? "Balance fully cleared ✓" : `Balance updated. Remaining: ₹${newBalance.toLocaleString()}`, "success");
+      setUpdateModal(null); setNewPayment(""); load(); onRefreshPending?.();
+    } catch (e) { addToast("Failed to update: " + (e?.message || String(e)), "error"); }
+  };
+
+  const totalPending = pending.reduce((s, p) => s + p.balance, 0);
+
+  return (
+    <div className="fade-in">
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 24 }}>
+        <div>
+          <h1 style={{ fontFamily: "'Cormorant Garamond', serif", fontSize: 28, fontWeight: 300, color: "#E8E4D9" }}>Pending Balances</h1>
+          <p style={{ color: "#555", fontSize: 13, marginTop: 4 }}>Customers who owe you money</p>
+        </div>
+        <GoldButton variant="outline" onClick={load}>{loading ? "Loading..." : "Refresh"}</GoldButton>
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 14, marginBottom: 20 }}>
+        <StatCard label="Pending Customers" value={pending.length} color="#c05f5f" icon="⚠" />
+        <StatCard label="Total Due Amount" value={rupees(totalPending)} color="#c05f5f" />
+        <StatCard label="Status" value={pending.length === 0 ? "All Clear ✓" : "Action Needed"} color={pending.length === 0 ? "#5fa05f" : "#c08060"} />
+      </div>
+
+      {pending.length === 0 ? (
+        <Card>
+          <div style={{ textAlign: "center", padding: "40px 0" }}>
+            <p style={{ fontSize: 32, marginBottom: 12 }}>✓</p>
+            <p style={{ color: "#5fa05f", fontSize: 15, fontWeight: 500 }}>No pending balances</p>
+            <p style={{ color: "#555", fontSize: 13, marginTop: 6 }}>All customers are fully paid up</p>
+          </div>
+        </Card>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          {pending.map(sale => (
+            <Card key={sale.sale_id} style={{ borderColor: "#3d1a1a" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+                <div style={{ flex: 1 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 6 }}>
+                    <span style={{ fontSize: 13, color: "#E8E4D9", fontWeight: 600 }}>{sale.customer_name}</span>
+                    {sale.customer_phone && <span style={{ fontSize: 12, color: "#555" }}>📞 {sale.customer_phone}</span>}
+                    <Badge color="#c05f5f">Bill #{sale.sale_id}</Badge>
+                  </div>
+                  <p style={{ fontSize: 12, color: "#555", marginBottom: 6 }}>{sale.created_at?.slice(0, 16)} · {sale.payment}</p>
+                  <p style={{ fontSize: 12, color: "#666", marginBottom: 10 }}>{sale.items_summary}</p>
+                  <div style={{ display: "flex", gap: 20 }}>
+                    <div>
+                      <p style={{ fontSize: 10, color: "#555", textTransform: "uppercase", letterSpacing: "0.08em" }}>Bill Total</p>
+                      <p style={{ fontSize: 14, color: "#C8C4B8", fontWeight: 500 }}>{rupees(sale.sale_total)}</p>
+                    </div>
+                    <div>
+                      <p style={{ fontSize: 10, color: "#555", textTransform: "uppercase", letterSpacing: "0.08em" }}>Paid</p>
+                      <p style={{ fontSize: 14, color: "#5fa05f", fontWeight: 500 }}>{rupees(sale.amount_paid)}</p>
+                    </div>
+                    <div>
+                      <p style={{ fontSize: 10, color: "#c05f5f", textTransform: "uppercase", letterSpacing: "0.08em" }}>Balance Due</p>
+                      <p style={{ fontSize: 18, color: "#c05f5f", fontWeight: 700 }}>{rupees(sale.balance)}</p>
+                    </div>
+                  </div>
+                </div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 8, marginLeft: 20 }}>
+                  <GoldButton onClick={() => openUpdate(sale)}>Collect Payment</GoldButton>
+                </div>
+              </div>
+            </Card>
+          ))}
+        </div>
+      )}
+
+      {updateModal && (
+        <Modal title={`Collect Payment — Bill #${updateModal.sale_id}`} onClose={() => setUpdateModal(null)} width={420}>
+          <div style={{ background: "#0d0d0d", borderRadius: 10, padding: 14, marginBottom: 18 }}>
+            <p style={{ fontSize: 13, color: "#C8C4B8", fontWeight: 600, marginBottom: 4 }}>{updateModal.customer_name}</p>
+            {updateModal.customer_phone && <p style={{ fontSize: 12, color: "#555", marginBottom: 8 }}>📞 {updateModal.customer_phone}</p>}
+            <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
+              <span style={{ fontSize: 12, color: "#666" }}>Bill Total</span>
+              <span style={{ fontSize: 13, color: "#C8C4B8" }}>{rupees(updateModal.sale_total)}</span>
+            </div>
+            <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
+              <span style={{ fontSize: 12, color: "#666" }}>Already Paid</span>
+              <span style={{ fontSize: 13, color: "#5fa05f" }}>{rupees(updateModal.amount_paid)}</span>
+            </div>
+            <div style={{ display: "flex", justifyContent: "space-between", borderTop: "1px solid #222", paddingTop: 8 }}>
+              <span style={{ fontSize: 13, color: "#c05f5f", fontWeight: 600 }}>Balance Due</span>
+              <span style={{ fontSize: 16, color: "#c05f5f", fontWeight: 700 }}>{rupees(updateModal.balance)}</span>
+            </div>
+          </div>
+          <FormField label="Amount Received Now (₹)">
+            <input type="number" value={newPayment} onChange={e => setNewPayment(e.target.value)} placeholder={`Max: ${updateModal.balance}`} autoFocus min={1} max={updateModal.balance} />
+          </FormField>
+          {newPayment && Number(newPayment) > 0 && (
+            <div style={{ background: "#1a2d1a", border: "1px solid #2d5c2d", borderRadius: 8, padding: "10px 14px", marginBottom: 14 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
+                <span style={{ fontSize: 12, color: "#888" }}>New Total Paid</span>
+                <span style={{ fontSize: 13, color: "#5fa05f" }}>{rupees((updateModal.amount_paid || 0) + Number(newPayment))}</span>
+              </div>
+              <div style={{ display: "flex", justifyContent: "space-between" }}>
+                <span style={{ fontSize: 12, color: "#888" }}>Remaining Balance</span>
+                <span style={{ fontSize: 13, color: Math.max(0, updateModal.balance - Number(newPayment)) === 0 ? "#5fa05f" : "#c05f5f", fontWeight: 600 }}>
+                  {Math.max(0, updateModal.balance - Number(newPayment)) === 0 ? "✓ Fully Paid!" : rupees(Math.max(0, updateModal.balance - Number(newPayment)))}
+                </span>
+              </div>
+            </div>
+          )}
+          <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
+            <GoldButton variant="outline" onClick={() => setUpdateModal(null)}>Cancel</GoldButton>
+            <GoldButton onClick={savePayment}>Save Payment</GoldButton>
+          </div>
+        </Modal>
+      )}
+    </div>
+  );
+}
+
 // ─── MAIN APP ─────────────────────────────────────────────────────────────────
 export default function App() {
   const [loggedIn, setLoggedIn] = useState(false);
@@ -1357,6 +1882,7 @@ export default function App() {
   const [activePage, setActivePage] = useState("dashboard");
   const [collapsed, setCollapsed] = useState(false);
   const [toasts, setToasts] = useState([]);
+  const [pendingCount, setPendingCount] = useState(0);
 
   useEffect(() => {
     const style = document.createElement("style");
@@ -1364,6 +1890,14 @@ export default function App() {
     document.head.appendChild(style);
     return () => document.head.removeChild(style);
   }, []);
+
+  const refreshPending = () => {
+    window.db?.getPendingBalances?.().then(p => setPendingCount(p.length)).catch(() => {});
+  };
+
+  useEffect(() => {
+    if (loggedIn) { refreshPending(); const t = setInterval(refreshPending, 30000); return () => clearInterval(t); }
+  }, [loggedIn]);
 
   const addToast = (message, type = "info") => {
     const id = Date.now();
@@ -1380,7 +1914,8 @@ export default function App() {
     inventory: <InventoryPage addToast={addToast} />,
     categories: <CategoriesPage addToast={addToast} />,
     reports: <ReportsPage />,
-    statement: <StatementPage addToast={addToast} />,
+    statement: <StatementPage addToast={addToast} onRefreshPending={refreshPending} />,
+    pending: <PendingBalancesPage addToast={addToast} onRefreshPending={refreshPending} />,
     expenses: <ExpensesPage addToast={addToast} />,
     settings: <SettingsPage addToast={addToast} onLogout={() => setLoggedIn(false)} />,
   };
@@ -1388,10 +1923,16 @@ export default function App() {
   return (
     <div style={{ minHeight: "100vh", background: "#0A0A0A", fontFamily: "'DM Sans', sans-serif" }}>
       <Toast toasts={toasts} />
-      <Sidebar active={activePage} setActive={setActivePage} collapsed={collapsed} setCollapsed={setCollapsed} userName={userName} />
+      <Sidebar active={activePage} setActive={setActivePage} collapsed={collapsed} setCollapsed={setCollapsed} userName={userName} pendingCount={pendingCount} />
       <div style={{ position: "fixed", top: 0, left: sideW, right: 0, height: 52, background: "#0D0D0D", borderBottom: "1px solid #1a1a1a", display: "flex", alignItems: "center", justifyContent: "space-between", padding: "0 28px", zIndex: 99, transition: "left 0.25s ease" }}>
         <p style={{ fontSize: 12, color: "#444", letterSpacing: "0.08em" }}>{NAV_ITEMS.find(n => n.id === activePage)?.label?.toUpperCase()}</p>
         <div style={{ display: "flex", alignItems: "center", gap: 20 }}>
+          {pendingCount > 0 && (
+            <div onClick={() => setActivePage("pending")} style={{ display: "flex", alignItems: "center", gap: 6, background: "#2d1a1a", border: "1px solid #5c2d2d", borderRadius: 8, padding: "4px 10px", cursor: "pointer" }}>
+              <span style={{ color: "#c05f5f", fontSize: 12 }}>⚠</span>
+              <span style={{ color: "#c05f5f", fontSize: 12, fontWeight: 600 }}>{pendingCount} pending balance{pendingCount > 1 ? "s" : ""}</span>
+            </div>
+          )}
           <p style={{ fontSize: 11, color: "#666" }}>{new Date().toLocaleDateString("en-IN", { weekday: "short", day: "numeric", month: "short", year: "numeric" })}</p>
           <div style={{ width: 30, height: 30, borderRadius: "50%", background: `${GOLD}20`, border: `1px solid ${GOLD}40`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 12, color: GOLD, fontWeight: 600 }}>{(userName || "A")[0].toUpperCase()}</div>
         </div>
