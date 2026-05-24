@@ -2,7 +2,6 @@ mod db;
 
 use tauri::Manager;
 use tauri_plugin_updater::UpdaterExt;
-use tauri::Manager as _;
 
 use db::{
     add_category, add_expense, add_product, delete_category, delete_expense, delete_product,

@@ -38,5 +38,13 @@
     "shortDescription": "Inventory, POS, expenses, and dashboard for Aura Fits",
     "longDescription": "Aura Fits Management Console built with Tauri, React, Vite, and SQLite.",
     "createUpdaterArtifacts": true
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "",
+      "endpoints": [
+        "https://github.com/bhatjunaid01/AuraFits-InventoryApp/releases/latest/download/latest.json"
+      ]
+    }
   }
 }
