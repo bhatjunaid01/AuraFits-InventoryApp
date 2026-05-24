@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Aura Fits",
-  "version": "1.0.7",
+  "version": "1.0.13",
   "identifier": "com.aurafits.desktop",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -41,7 +41,7 @@
   },
   "plugins": {
     "updater": {
-      "pubkey": "",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IHVudHJ1c3RlZCBrZXkKUlNJR05BVFVSRV9LRVY9MU1lbnRyeVYxCnByaXZrZXlfcGtjcyA9IDNkZGFlYjQyY2RhNWQwZGUKcHVibGljX2tleV9iNjQgPSBkVzUwY25WeldHVklHTnZiVzFsYm5RNklHMXBibVF6TUZsM2NsUkpOWHBST0RCVFZHOXljRXBzUkVsck1WWlVVVkpHVlRKT04ydFFWSEpPUlU5TmVGcE9VRmxLWjFkVFZqSXdXRzFaWkZSV1gzTkdkM2REVVZsUVVtNUJXa0ZOYzJkMVptaHlPVGhsZEZGVFVWTlFhdUJBUVlXaGpSbVZXSW10T1l3PT0KTlhWUWQwNVpPRXAyV1hudWFHRkNSa3RVTDFWWVpub0s=",
       "endpoints": [
         "https://github.com/bhatjunaid01/AuraFits-InventoryApp/releases/latest/download/latest.json"
       ]
