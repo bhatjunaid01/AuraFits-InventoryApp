@@ -42,6 +42,18 @@ jobs:
         with:
           workspaces: './src-tauri -> target'
 
+      - name: Set version from tag
+        shell: bash
+        run: |
+          VERSION=${GITHUB_REF_NAME#v}
+          node -e "
+            const fs = require('fs');
+            const config = JSON.parse(fs.readFileSync('src-tauri/tauri.conf.json', 'utf8'));
+            config.version = '${VERSION}';
+            fs.writeFileSync('src-tauri/tauri.conf.json', JSON.stringify(config, null, 2));
+            console.log('Version set to: ${VERSION}');
+          "
+
       - name: Install frontend dependencies
         run: npm ci
 
