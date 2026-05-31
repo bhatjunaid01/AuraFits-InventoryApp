@@ -1824,7 +1824,7 @@ function PaymentUpdater({ sale, addToast, onDone }) {
     if (!newPayment || newPaid <= 0) { addToast("Enter amount received", "error"); return; }
     if (newPaid > remaining) { addToast("Amount exceeds balance due", "error"); return; }
     try {
-      await window.db.updateBalance(sale.sale_id, totalPaid, newBalance);
+      await window.__TAURI__.core.invoke("update_balance", { sale_id: sale.sale_id, amount_paid: totalPaid, balance: newBalance });
       addToast(newBalance === 0 ? "Balance fully cleared ✓" : `Payment recorded. Remaining: ₹${newBalance.toLocaleString()}`, "success");
       onDone();
     } catch (e) { addToast("Failed: " + (e?.message || String(e)), "error"); }
@@ -2015,7 +2015,7 @@ function PendingBalancesPage({ addToast, onRefreshPending }) {
     const newPaid = (updateModal.amount_paid || 0) + extra;
     const newBalance = Math.max(0, (updateModal.sale_total || 0) - newPaid);
     try {
-      await window.db.updateBalance(updateModal.sale_id, newPaid, newBalance);
+      await window.__TAURI__.core.invoke("update_balance", { sale_id: updateModal.sale_id, amount_paid: newPaid, balance: newBalance });
       addToast(newBalance === 0 ? "Balance fully cleared ✓" : `Balance updated. Remaining: ₹${newBalance.toLocaleString()}`, "success");
       setUpdateModal(null); setNewPayment(""); load(); onRefreshPending?.();
     } catch (e) { addToast("Failed to update: " + (e?.message || String(e)), "error"); }
@@ -2162,7 +2162,7 @@ function PersonalExpensesPage({ addToast }) {
   const [personFilter, setPersonFilter] = useState("All");
   const [form, setForm] = useState({ person: "", name: "", amount: "", date: todayDate(), notes: "" });
 
-  const load = () => window.db.getPersonalExpenses().then(setExpenses).catch(() => {});
+  const load = () => window.__TAURI__.core.invoke("get_personal_expenses").then(setExpenses).catch(() => {});
   useEffect(() => { load(); }, []);
 
   const persons = ["All", ...Array.from(new Set(expenses.map(e => e.person).filter(Boolean)))];
@@ -2172,13 +2172,13 @@ function PersonalExpensesPage({ addToast }) {
 
   const openAdd = () => { setForm({ person: "", name: "", amount: "", date: todayDate(), notes: "" }); setEditExpense(null); setShowModal(true); };
   const openEdit = (i) => { setForm({ ...filtered[i] }); setEditExpense(filtered[i]); setShowModal(true); };
-  const doDelete = async (i) => { await window.db.deletePersonalExpense(filtered[i].id); addToast("Deleted", "info"); load(); };
+  const doDelete = async (i) => { await window.__TAURI__.core.invoke("delete_personal_expense", { id: filtered[i].id }); addToast("Deleted", "info"); load(); };
 
   const save = async () => {
     if (!form.person || !form.name || !form.amount) { addToast("Fill all required fields", "error"); return; }
     const e = { ...form, amount: Number(form.amount) };
-    if (editExpense) { await window.db.updatePersonalExpense({ ...e, id: editExpense.id }); addToast("Updated", "success"); }
-    else { await window.db.addPersonalExpense(e); addToast("Added", "success"); }
+    if (editExpense) { await window.__TAURI__.core.invoke("update_personal_expense", { expense: { ...e, id: editExpense.id } }); addToast("Updated", "success"); }
+    else { await window.__TAURI__.core.invoke("add_personal_expense", { expense: e }); addToast("Added", "success"); }
     setShowModal(false); load();
   };
 
