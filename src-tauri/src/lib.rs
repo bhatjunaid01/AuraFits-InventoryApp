@@ -8,7 +8,8 @@ use db::{
     find_user, get_categories, get_expenses, get_products, get_sales_stats, get_today_sales,
     get_statement, login, record_sale, reset_password, signup, update_category, update_expense,
     update_product, delete_sale, update_sale, get_pending_balances, update_balance,
-    verify_security_answer, AppState,
+    verify_security_answer, get_personal_expenses, add_personal_expense,
+    update_personal_expense, delete_personal_expense, AppState,
 };
 
 pub fn run() {
@@ -70,7 +71,11 @@ pub fn run() {
             delete_sale,
             update_sale,
             get_pending_balances,
-            update_balance
+            update_balance,
+            get_personal_expenses,
+            add_personal_expense,
+            update_personal_expense,
+            delete_personal_expense
         ])
         .run(tauri::generate_context!())
         .expect("error while running Aura Fits");
